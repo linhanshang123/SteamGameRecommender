@@ -1,75 +1,139 @@
 from __future__ import annotations
 
+import json
+
 from langchain_openai import ChatOpenAI
 
 from app.core.config import get_settings
-from app.schemas.recommendation import GameRow, ParsedUserIntent, ScoreBreakdown
+from app.schemas.recommendation import (
+    GameRow,
+    LlmRerankItem,
+    LlmRerankResponse,
+    ParsedUserIntent,
+    RecommendationDebugPayload,
+    ScoreBreakdown,
+)
+
+
+def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
+    return max(minimum, min(maximum, value))
 
 
 def fallback_reason(
     game: GameRow,
     intent: ParsedUserIntent,
     score_breakdown: ScoreBreakdown,
-) -> str:
-    matched_tags = [
-        tag for tag in (game.tags or []) if tag.lower() in intent.preferred_tags
-    ][:3]
+    debug_payload: RecommendationDebugPayload,
+) -> tuple[str, str]:
+    matched_tags = debug_payload.matched_preferred_tags[:3]
+    text_terms = debug_payload.text_matched_terms[:3]
 
-    tag_phrase = (
-        f"It lines up with {', '.join(matched_tags)}."
-        if matched_tags
-        else "It broadly fits the vibe described in your prompt."
-    )
-    review_phrase = (
-        " It also has a stronger review base than most niche candidates."
-        if (game.total_reviews or 0) > 500
-        else " It stays in the mix because its text match is stronger than average."
-    )
-    guard_phrase = (
-        " There is some tension with one avoided direction, so it ranked lower than a cleaner match would."
-        if score_breakdown.avoid_penalty > 0.1
-        else ""
-    )
-    return f"{tag_phrase}{review_phrase}{guard_phrase}"
+    if matched_tags:
+        reason = f"It matches your requested directions through {', '.join(matched_tags)}."
+    elif text_terms:
+        reason = f"It lines up with your prompt language around {', '.join(text_terms)}."
+    else:
+        reason = "It remains one of the closest catalog matches after broader candidate filtering."
+
+    concern = ""
+    if debug_payload.matched_avoid_tags:
+        concern = f"It still brushes against avoided elements such as {', '.join(debug_payload.matched_avoid_tags[:2])}."
+    elif score_breakdown.reference_similarity_score < 0.2 and intent.reference_games:
+        concern = "It fits the broad request, but its similarity to the reference game is weaker than the top matches."
+
+    return reason, concern
 
 
-def build_reason(
-    game: GameRow,
+def rerank_candidates(
+    candidates: list[tuple[GameRow, ScoreBreakdown, RecommendationDebugPayload]],
     intent: ParsedUserIntent,
-    score_breakdown: ScoreBreakdown,
-) -> str:
+    resolved_reference_games: list[GameRow],
+) -> tuple[dict[str, LlmRerankItem], str | None]:
     settings = get_settings()
-    if not settings.openai_api_key:
-        return fallback_reason(game, intent, score_breakdown)
+    if not settings.openai_api_key or not candidates:
+        return {}, "OPENAI_API_KEY not configured or candidate list is empty."
 
-    model = ChatOpenAI(
-        api_key=settings.openai_api_key,
-        model="gpt-5.4-mini",
-        temperature=0.3,
-    )
-    response = model.invoke(
-        [
-            (
-                "system",
-                "Write one concise recommendation reason for a Steam game. Mention fit, not chain-of-thought. Keep it under 28 words.",
-            ),
-            (
-                "human",
-                str(
-                    {
-                        "prompt": intent.free_text_intent,
-                        "preferred_tags": intent.preferred_tags,
-                        "avoid_tags": intent.avoid_tags,
-                        "game": {
-                            "name": game.name,
-                            "tags": game.tags or [],
-                            "genres": game.genres or [],
-                            "description": game.llm_context or "",
-                        },
-                        "scoreBreakdown": score_breakdown.model_dump(),
-                    }
+    candidate_payload = [
+        {
+            "appid": game.appid,
+            "name": game.name,
+            "tags": game.tags or [],
+            "genres": game.genres or [],
+            "llm_context": (game.llm_context or "")[:500],
+            "deterministic_score": breakdown.deterministic_score,
+            "matched_preferred_tags": debug_payload.matched_preferred_tags,
+            "text_matched_terms": debug_payload.text_matched_terms,
+            "matched_avoid_tags": debug_payload.matched_avoid_tags,
+        }
+        for game, breakdown, debug_payload in candidates
+    ]
+    reference_payload = [
+        {
+            "appid": game.appid,
+            "name": game.name,
+            "tags": game.tags or [],
+            "genres": game.genres or [],
+            "llm_context": (game.llm_context or "")[:350],
+        }
+        for game in resolved_reference_games
+    ]
+
+    try:
+        model = ChatOpenAI(
+            api_key=settings.openai_api_key,
+            model="gpt-5.4-mini",
+            temperature=0,
+        )
+        response = model.invoke(
+            [
+                (
+                    "system",
+                    "You rerank Steam game candidates. You may score only the provided candidates and must not invent or rename any game. "
+                    "Return valid JSON only with a top-level object shaped like {\"results\":[...]} and no markdown fences. "
+                    "llm_match_score must be a number from 0.0 to 1.0. "
+                    "reason should be one concise sentence about why the game matches. "
+                    "concern should be one concise sentence about any mismatch or risk, or an empty string if none.",
                 ),
-            ),
-        ]
-    )
-    return response.content if isinstance(response.content, str) else str(response.content)
+                (
+                    "human",
+                    str(
+                        {
+                            "prompt": intent.free_text_intent,
+                            "preferred_tags": intent.preferred_tags,
+                            "avoid_tags": intent.avoid_tags,
+                            "reference_games": intent.reference_games,
+                            "resolved_reference_games": reference_payload,
+                            "candidates": candidate_payload,
+                        }
+                    ),
+                ),
+            ]
+        )
+        raw_content = response.content if isinstance(response.content, str) else str(response.content)
+        normalized_content = raw_content.strip()
+        if normalized_content.startswith("```"):
+            normalized_content = normalized_content.strip("`")
+            normalized_content = normalized_content.removeprefix("json").strip()
+        response_payload = LlmRerankResponse.model_validate(json.loads(normalized_content))
+    except Exception as exc:
+        return {}, str(exc)
+
+    allowed_appids = {game.appid for game, _, _ in candidates}
+    reranked: dict[str, LlmRerankItem] = {}
+    for item in response_payload.results:
+        if item.appid not in allowed_appids:
+            continue
+        reranked[item.appid] = LlmRerankItem(
+            appid=item.appid,
+            llm_match_score=clamp(item.llm_match_score),
+            reason=item.reason.strip(),
+            concern=item.concern.strip(),
+        )
+
+    if not reranked:
+        return {}, "Reranker returned no usable candidate scores."
+
+    return reranked, None
+
+
+# TODO: Replace fallback-only reasoning with richer hybrid explanations once embedding retrieval exists.

@@ -9,6 +9,8 @@ export type Json =
 export type ParsedUserIntent = {
   preferred_tags: string[];
   avoid_tags: string[];
+  reference_games: string[];
+  include_reference_games: boolean;
   free_text_intent: string;
   constraints?: {
     price_max?: number;
@@ -21,10 +23,23 @@ export type ParsedUserIntent = {
 export type ScoreBreakdown = {
   tag_match_score: number;
   text_match_score: number;
+  reference_similarity_score: number;
   rating_confidence_score: number;
   popularity_reliability_score: number;
   preference_history_score?: number;
   avoid_penalty: number;
+  deterministic_score: number;
+  llm_match_score: number;
+};
+
+export type RecommendationDebugPayload = {
+  matched_preferred_tags: string[];
+  matched_avoid_tags: string[];
+  text_matched_terms: string[];
+  resolved_reference_appids: string[];
+  retrieval_routes: string[];
+  rerank_applied: boolean;
+  rerank_error: string | null;
 };
 
 export type RankedRecommendation = {
@@ -38,6 +53,10 @@ export type RankedRecommendation = {
   finalScore: number;
   scoreBreakdown: ScoreBreakdown;
   reason: string;
+  concern: string;
+  debugPayload: RecommendationDebugPayload;
+  deterministicScore: number;
+  llmMatchScore: number;
   rank: number;
 };
 
@@ -93,8 +112,12 @@ export type RecommendationResultRow = {
   game_appid: string;
   rank: number;
   reason: string;
+  concern: string | null;
   score: number;
+  deterministic_score: number | null;
+  llm_match_score: number | null;
   score_breakdown: ScoreBreakdown;
+  debug_payload: RecommendationDebugPayload | null;
   created_at: string;
 };
 

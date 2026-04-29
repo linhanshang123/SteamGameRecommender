@@ -13,6 +13,8 @@ class IntentConstraints(BaseModel):
 class ParsedUserIntent(BaseModel):
     preferred_tags: list[str] = Field(default_factory=list)
     avoid_tags: list[str] = Field(default_factory=list)
+    reference_games: list[str] = Field(default_factory=list)
+    include_reference_games: bool = False
     free_text_intent: str = ""
     constraints: IntentConstraints | None = None
 
@@ -20,10 +22,34 @@ class ParsedUserIntent(BaseModel):
 class ScoreBreakdown(BaseModel):
     tag_match_score: float
     text_match_score: float
+    reference_similarity_score: float
     rating_confidence_score: float
     popularity_reliability_score: float
     preference_history_score: float | None = None
     avoid_penalty: float
+    deterministic_score: float
+    llm_match_score: float
+
+
+class RecommendationDebugPayload(BaseModel):
+    matched_preferred_tags: list[str] = Field(default_factory=list)
+    matched_avoid_tags: list[str] = Field(default_factory=list)
+    text_matched_terms: list[str] = Field(default_factory=list)
+    resolved_reference_appids: list[str] = Field(default_factory=list)
+    retrieval_routes: list[str] = Field(default_factory=list)
+    rerank_applied: bool = False
+    rerank_error: str | None = None
+
+
+class LlmRerankItem(BaseModel):
+    appid: str
+    llm_match_score: float = 0.0
+    reason: str = ""
+    concern: str = ""
+
+
+class LlmRerankResponse(BaseModel):
+    results: list[LlmRerankItem] = Field(default_factory=list)
 
 
 class RankedRecommendation(BaseModel):
@@ -37,6 +63,10 @@ class RankedRecommendation(BaseModel):
     finalScore: float
     scoreBreakdown: ScoreBreakdown
     reason: str
+    concern: str = ""
+    debugPayload: RecommendationDebugPayload = Field(default_factory=RecommendationDebugPayload)
+    deterministicScore: float
+    llmMatchScore: float
     rank: int
 
 

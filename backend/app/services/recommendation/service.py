@@ -6,18 +6,51 @@ from app.schemas.recommendation import (
     HistoryEntry,
     ParsedUserIntent,
     RankedRecommendation,
+    RecommendationDebugPayload,
     RecommendationResponse,
     RecommendationSessionResponse,
+    ScoreBreakdown,
     SessionPayload,
 )
 from app.services.recommendation.intent import parse_user_intent
-from app.services.recommendation.reason import build_reason
-from app.services.recommendation.retrieve import fetch_candidate_games
+from app.services.recommendation.reason import fallback_reason, rerank_candidates
+from app.services.recommendation.retrieve import fetch_candidate_games, resolve_reference_games
 from app.services.recommendation.scoring import score_game
 
 
 def _rows_to_sessions(rows: list[dict]) -> list[SessionPayload]:
     return [SessionPayload.model_validate(row) for row in rows]
+
+
+def _normalize_score_breakdown(raw: dict | None, score: float) -> ScoreBreakdown:
+    payload = raw or {}
+    return ScoreBreakdown.model_validate(
+        {
+            "tag_match_score": payload.get("tag_match_score", 0.0),
+            "text_match_score": payload.get("text_match_score", 0.0),
+            "reference_similarity_score": payload.get("reference_similarity_score", 0.0),
+            "rating_confidence_score": payload.get("rating_confidence_score", 0.0),
+            "popularity_reliability_score": payload.get("popularity_reliability_score", 0.0),
+            "preference_history_score": payload.get("preference_history_score"),
+            "avoid_penalty": payload.get("avoid_penalty", 0.0),
+            "deterministic_score": payload.get("deterministic_score", score),
+            "llm_match_score": payload.get("llm_match_score", 0.0),
+        }
+    )
+
+
+def _normalize_debug_payload(raw: dict | None) -> RecommendationDebugPayload:
+    return RecommendationDebugPayload.model_validate(
+        {
+            "matched_preferred_tags": (raw or {}).get("matched_preferred_tags", []),
+            "matched_avoid_tags": (raw or {}).get("matched_avoid_tags", []),
+            "text_matched_terms": (raw or {}).get("text_matched_terms", []),
+            "resolved_reference_appids": (raw or {}).get("resolved_reference_appids", []),
+            "retrieval_routes": (raw or {}).get("retrieval_routes", []),
+            "rerank_applied": (raw or {}).get("rerank_applied", False),
+            "rerank_error": (raw or {}).get("rerank_error"),
+        }
+    )
 
 
 def fetch_user_history(user_id: str) -> list[SessionPayload]:
@@ -42,18 +75,59 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
 
     intent = parse_user_intent(normalized_prompt)
     history = fetch_user_history(user_id)
-    candidates = fetch_candidate_games(intent)
+    resolved_reference_games = resolve_reference_games(intent)
+    candidate_pool = fetch_candidate_games(intent, resolved_reference_games)
 
-    scored_candidates = []
-    for game in candidates:
-        final_score, breakdown = score_game(game, intent, history)
-        scored_candidates.append((game, final_score, breakdown))
+    scored_candidates: list[tuple[GameRow, ScoreBreakdown, RecommendationDebugPayload]] = []
+    for game in candidate_pool.candidates:
+        deterministic_score, breakdown, debug_payload = score_game(
+            game,
+            intent,
+            history,
+            candidate_pool.resolved_reference_games,
+            candidate_pool.retrieval_routes.get(game.appid, []),
+        )
+        breakdown.deterministic_score = deterministic_score
+        scored_candidates.append((game, breakdown, debug_payload))
 
-    scored_candidates.sort(key=lambda entry: entry[1], reverse=True)
-    top_candidates = scored_candidates[:5]
+    scored_candidates.sort(key=lambda entry: entry[1].deterministic_score, reverse=True)
+    rerank_window = scored_candidates[:20]
+    rerank_map, rerank_error = rerank_candidates(
+        rerank_window,
+        intent,
+        candidate_pool.resolved_reference_games,
+    )
 
     recommendations: list[RankedRecommendation] = []
-    for index, (game, final_score, breakdown) in enumerate(top_candidates, start=1):
+    final_candidates: list[tuple[GameRow, ScoreBreakdown, RecommendationDebugPayload, str, str, float]] = []
+
+    for game, breakdown, debug_payload in rerank_window:
+        rerank_item = rerank_map.get(game.appid)
+        llm_match_score = rerank_item.llm_match_score if rerank_item else 0.0
+        breakdown.llm_match_score = llm_match_score
+        combined_score = 0.50 * breakdown.deterministic_score + 0.50 * llm_match_score
+        debug_payload.rerank_applied = rerank_error is None
+        debug_payload.rerank_error = rerank_error
+
+        if rerank_item and rerank_item.reason:
+            reason = rerank_item.reason
+            concern = rerank_item.concern
+        else:
+            reason, concern = fallback_reason(game, intent, breakdown, debug_payload)
+
+        final_candidates.append(
+            (game, breakdown, debug_payload, reason, concern, combined_score)
+        )
+
+    final_candidates.sort(
+        key=lambda entry: (entry[5], entry[1].deterministic_score),
+        reverse=True,
+    )
+
+    for index, (game, breakdown, debug_payload, reason, concern, combined_score) in enumerate(
+        final_candidates[:5],
+        start=1,
+    ):
         recommendations.append(
             RankedRecommendation(
                 appid=game.appid,
@@ -63,9 +137,13 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
                 tags=game.tags or [],
                 genres=game.genres or [],
                 ratingRatio=game.rating_ratio or 0,
-                finalScore=final_score,
+                finalScore=combined_score,
                 scoreBreakdown=breakdown,
-                reason=build_reason(game, intent, breakdown),
+                reason=reason,
+                concern=concern,
+                debugPayload=debug_payload,
+                deterministicScore=breakdown.deterministic_score,
+                llmMatchScore=breakdown.llm_match_score,
                 rank=index,
             )
         )
@@ -95,8 +173,12 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
                 "game_appid": recommendation.appid,
                 "rank": recommendation.rank,
                 "reason": recommendation.reason,
+                "concern": recommendation.concern,
                 "score": recommendation.finalScore,
+                "deterministic_score": recommendation.deterministicScore,
+                "llm_match_score": recommendation.llmMatchScore,
                 "score_breakdown": recommendation.scoreBreakdown.model_dump(),
+                "debug_payload": recommendation.debugPayload.model_dump(),
             }
             for recommendation in recommendations
         ]
@@ -153,6 +235,8 @@ def get_recommendation_session(session_id: str, user_id: str) -> RecommendationS
         game = games_map.get(result["game_appid"])
         if not game:
             continue
+        score_breakdown = _normalize_score_breakdown(result.get("score_breakdown"), result["score"])
+        debug_payload = _normalize_debug_payload(result.get("debug_payload"))
         recommendations.append(
             RankedRecommendation(
                 appid=game.appid,
@@ -163,8 +247,12 @@ def get_recommendation_session(session_id: str, user_id: str) -> RecommendationS
                 genres=game.genres or [],
                 ratingRatio=game.rating_ratio or 0,
                 finalScore=result["score"],
-                scoreBreakdown=result["score_breakdown"],
+                scoreBreakdown=score_breakdown,
                 reason=result["reason"],
+                concern=result.get("concern") or "",
+                debugPayload=debug_payload,
+                deterministicScore=result.get("deterministic_score") or score_breakdown.deterministic_score,
+                llmMatchScore=result.get("llm_match_score") or score_breakdown.llm_match_score,
                 rank=result["rank"],
             )
         )
