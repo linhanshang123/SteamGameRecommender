@@ -1,0 +1,60 @@
+# Environment variables
+.env
+.env.*
+*.env
+*.env.local
+
+# Keep examples
+!.env.example
+!*.env.example
+!frontend/.env.example
+!backend/.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+ENV/
+
+# FastAPI / backend runtime
+*.log
+logs/
+
+# Node / Next.js
+node_modules/
+.next/
+out/
+dist/
+build/
+.vercel/
+.turbo/
+
+# TypeScript
+*.tsbuildinfo
+next-env.d.ts
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Playwright / browser artifacts
+.playwright-mcp/
+playwright-report/
+test-results/
+
+# Local temp/cache
+.cache/
+tmp/
+temp/
+
+# Data
