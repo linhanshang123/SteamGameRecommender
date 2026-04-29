@@ -24,6 +24,7 @@ class Settings:
     openai_api_key: str
     clerk_secret_key: str
     cors_origins: list[str]
+    cors_origin_regex: str | None
 
 
 @lru_cache(maxsize=1)
@@ -34,6 +35,10 @@ def get_settings() -> Settings:
         "http://localhost:3000,http://127.0.0.1:3000",
     )
     cors_origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+    cors_origin_regex = os.getenv(
+        "BACKEND_CORS_ORIGIN_REGEX",
+        r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    ).strip() or None
 
     return Settings(
         supabase_url=os.getenv("SUPABASE_URL", ""),
@@ -41,4 +46,5 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         clerk_secret_key=os.getenv("CLERK_SECRET_KEY", ""),
         cors_origins=cors_origins,
+        cors_origin_regex=cors_origin_regex,
     )

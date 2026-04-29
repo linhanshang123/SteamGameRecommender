@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from enum import Enum
+
 from pydantic import BaseModel, Field
 
 
@@ -33,6 +35,20 @@ class ReferenceAnchorProfile(BaseModel):
     presentation_style: list[str] = Field(default_factory=list)
     loop_shape: list[str] = Field(default_factory=list)
     summary: str = ""
+
+
+class RecommendationBucketType(str, Enum):
+    CLOSEST_MATCHES = "closest_matches"
+    SIMILAR_BUT_NOVEL = "similar_but_novel"
+    NICHE_PICKS = "niche_picks"
+
+
+class RecommendationArchetype(BaseModel):
+    summary: str = ""
+    core_experience: list[str] = Field(default_factory=list)
+    required_alignment: list[str] = Field(default_factory=list)
+    allowed_novelty_axes: list[str] = Field(default_factory=list)
+    hard_drifts_to_avoid: list[str] = Field(default_factory=list)
 
 
 class ParsedUserIntent(BaseModel):
@@ -110,6 +126,29 @@ class LlmRerankResponse(BaseModel):
     results: list[LlmRerankItem] = Field(default_factory=list)
 
 
+class BucketEvidence(BaseModel):
+    bucket_fit_score: float = 0.0
+    novelty_support_score: float = 0.0
+    niche_conviction_score: float = 0.0
+
+
+class LlmBucketJudgmentItem(BaseModel):
+    appid: str
+    bucket: RecommendationBucketType | None = None
+    bucket_reason: str = ""
+    concern: str = ""
+    novelty_axis: str | None = None
+    standout_hook: str | None = None
+    secondary_traits: list[str] = Field(default_factory=list)
+    bucket_fit_score: float = 0.0
+    novelty_support_score: float = 0.0
+    niche_conviction_score: float = 0.0
+
+
+class LlmBucketJudgmentResponse(BaseModel):
+    results: list[LlmBucketJudgmentItem] = Field(default_factory=list)
+
+
 class RankedRecommendation(BaseModel):
     appid: str
     name: str
@@ -126,6 +165,17 @@ class RankedRecommendation(BaseModel):
     deterministicScore: float
     llmMatchScore: float
     rank: int
+    bucket: RecommendationBucketType
+    bucketRank: int
+    bucketReason: str
+    bucketEvidence: BucketEvidence = Field(default_factory=BucketEvidence)
+    secondaryTraits: list[str] = Field(default_factory=list)
+
+
+class RecommendationBuckets(BaseModel):
+    closest_matches: list[RankedRecommendation] = Field(default_factory=list)
+    similar_but_novel: list[RankedRecommendation] = Field(default_factory=list)
+    niche_picks: list[RankedRecommendation] = Field(default_factory=list)
 
 
 class RecommendationRequest(BaseModel):
@@ -135,6 +185,8 @@ class RecommendationRequest(BaseModel):
 class RecommendationResponse(BaseModel):
     sessionId: str
     intent: ParsedUserIntent
+    archetype: RecommendationArchetype
+    buckets: RecommendationBuckets
     recommendations: list[RankedRecommendation]
 
 
@@ -143,11 +195,14 @@ class SessionPayload(BaseModel):
     user_id: str
     prompt: str
     normalized_preferences: ParsedUserIntent
+    archetype: RecommendationArchetype | None = None
     created_at: str
 
 
 class RecommendationSessionResponse(BaseModel):
     session: SessionPayload
+    archetype: RecommendationArchetype
+    buckets: RecommendationBuckets
     recommendations: list[RankedRecommendation]
 
 

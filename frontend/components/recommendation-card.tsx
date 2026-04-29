@@ -12,6 +12,49 @@ function formatPrice(price: number | null) {
   return `$${price.toFixed(2)}`;
 }
 
+function normalizedBucket(bucket: RankedRecommendation["bucket"]) {
+  return bucket ?? "closest_matches";
+}
+
+function bucketLabel(bucket: RankedRecommendation["bucket"]) {
+  switch (normalizedBucket(bucket)) {
+    case "closest_matches":
+      return "Closest match";
+    case "similar_but_novel":
+      return "Similar but novel";
+    case "niche_picks":
+      return "Niche pick";
+  }
+}
+
+function evidenceLabel(recommendation: RankedRecommendation) {
+  switch (normalizedBucket(recommendation.bucket)) {
+    case "closest_matches":
+      return "Alignment";
+    case "similar_but_novel":
+      return "Novelty";
+    case "niche_picks":
+      return "Conviction";
+  }
+}
+
+function evidenceValue(recommendation: RankedRecommendation) {
+  const bucketEvidence = recommendation.bucketEvidence ?? {
+    bucket_fit_score: recommendation.finalScore,
+    novelty_support_score: 0,
+    niche_conviction_score: 0,
+  };
+
+  switch (normalizedBucket(recommendation.bucket)) {
+    case "closest_matches":
+      return bucketEvidence.bucket_fit_score;
+    case "similar_but_novel":
+      return bucketEvidence.novelty_support_score;
+    case "niche_picks":
+      return bucketEvidence.niche_conviction_score;
+  }
+}
+
 export function RecommendationCard({
   recommendation,
 }: {
@@ -26,8 +69,8 @@ export function RecommendationCard({
           className="h-full w-full object-cover"
         />
         <div className="absolute inset-0 bg-gradient-to-t from-slate-950 via-slate-950/20 to-transparent" />
-        <div className="absolute left-4 top-4 rounded-full border border-white/15 bg-black/35 px-3 py-1 text-xs uppercase tracking-[0.25em] text-white/80">
-          #{recommendation.rank}
+        <div className="absolute left-4 top-4 rounded-full border border-white/15 bg-black/35 px-3 py-1 text-xs uppercase tracking-[0.22em] text-white/80">
+          {bucketLabel(recommendation.bucket)} #{recommendation.bucketRank ?? recommendation.rank}
         </div>
       </div>
 
@@ -41,15 +84,23 @@ export function RecommendationCard({
           </div>
           <div className="rounded-2xl border border-cyan-200/18 bg-cyan-100/6 px-3 py-2 text-right">
             <p className="text-[0.65rem] uppercase tracking-[0.22em] text-slate-300/66">
-              Match score
+              {evidenceLabel(recommendation)}
             </p>
             <p className="text-lg font-semibold text-cyan-100">
-              {(recommendation.finalScore * 100).toFixed(0)}
+              {(evidenceValue(recommendation) * 100).toFixed(0)}
             </p>
           </div>
         </div>
 
         <div className="flex flex-wrap gap-2">
+          {(recommendation.secondaryTraits ?? []).slice(0, 2).map((trait) => (
+            <span
+              key={trait}
+              className="rounded-full border border-amber-200/16 bg-amber-100/8 px-3 py-1 text-xs text-amber-50/92"
+            >
+              {trait}
+            </span>
+          ))}
           {recommendation.tags.slice(0, 5).map((tag) => (
             <span
               key={tag}
@@ -60,7 +111,12 @@ export function RecommendationCard({
           ))}
         </div>
 
-        <p className="text-sm leading-6 text-slate-200/86">{recommendation.reason}</p>
+        <p className="text-sm leading-6 text-slate-200/86">
+          {recommendation.bucketReason ?? recommendation.reason}
+        </p>
+        {recommendation.concern ? (
+          <p className="text-sm leading-6 text-amber-100/74">{recommendation.concern}</p>
+        ) : null}
 
         <dl className="grid grid-cols-2 gap-3 text-sm text-slate-300/80 md:grid-cols-3">
           <div className="rounded-2xl border border-white/8 bg-white/4 px-3 py-3">

@@ -6,6 +6,7 @@ from app.schemas.recommendation import (
     ExperienceAxes,
     GameRow,
     ParsedUserIntent,
+    RecommendationArchetype,
     ReferenceAnchorProfile,
     SoftAvoids,
 )
@@ -249,6 +250,98 @@ def _compose_summary(profile: ReferenceAnchorProfile) -> str:
     if profile.presentation_style:
         summary_parts.append(f"presentation: {', '.join(profile.presentation_style[:3])}")
     return "; ".join(summary_parts)
+
+
+def _comma_join(values: list[str], fallback: str) -> str:
+    cleaned = [value for value in values if value]
+    if not cleaned:
+        return fallback
+    if len(cleaned) == 1:
+        return cleaned[0]
+    return ", ".join(cleaned[:-1]) + f", and {cleaned[-1]}"
+
+
+def build_recommendation_archetype(intent: ParsedUserIntent) -> RecommendationArchetype:
+    axes = intent.experience_axes
+    anchor = intent.reference_anchor_profile
+
+    core_experience = _dedupe(
+        [
+            *(anchor.combat_feel if anchor else []),
+            *(axes.combat_feel or []),
+            *(anchor.loop_shape if anchor else []),
+            *(axes.loop_shape or []),
+            *(anchor.presentation_style if anchor else []),
+            *(axes.presentation_style or []),
+        ]
+    )
+    if axes.combat_pace:
+        core_experience.insert(0, f"{axes.combat_pace} combat pace")
+
+    required_alignment = _dedupe(
+        [
+            *(["stays close to the reference game's core action loop"] if intent.reference_games else []),
+            *(["preserves fast, low-friction combat energy"] if axes.combat_pace == "fast" else []),
+            *(["keeps the run-based structure readable and momentum-driven"] if "run-based" in core_experience else []),
+            *(["retains top-down or isometric readability"] if "top-down" in core_experience else []),
+            *(["supports a stylish or atmospheric presentation hook"] if {"stylized", "atmospheric", "beautiful", "polished"} & set(core_experience) else []),
+        ]
+    )
+
+    hard_drifts_to_avoid = _dedupe(
+        [
+            *(["strategy-heavy drift"] if intent.implicit_soft_avoids.strategy_heavy else []),
+            *(["slow or deliberate combat drag"] if intent.implicit_soft_avoids.slow_combat else []),
+            *(["clunky-feel combat"] if intent.implicit_soft_avoids.clunky_feel else []),
+            *(["shooter-dominant drift"] if intent.implicit_soft_avoids.shooter_dominant else []),
+            *(["platforming-first structure"] if "platforming" not in core_experience and intent.reference_games else []),
+        ]
+    )
+
+    allowed_novelty_axes = _dedupe(
+        [
+            "theme",
+            "presentation",
+            "progression structure",
+            *(["combat expression"] if "action-driven" in core_experience else []),
+            *(["perspective"] if "top-down" in core_experience else []),
+            *(["build variety"] if "build-variety" in core_experience else []),
+        ]
+    )
+
+    summary_parts: list[str] = []
+    if intent.reference_games:
+        summary_parts.append(
+            f"The user is looking for {_comma_join(intent.reference_games[:1], 'a reference game')}-like core energy,"
+        )
+    else:
+        summary_parts.append("The user is looking for a specific play-experience archetype,")
+
+    pace_phrase = (
+        f"{axes.combat_pace}, " if axes.combat_pace else ""
+    )
+    feel_phrase = _comma_join((anchor.combat_feel if anchor else []) or axes.combat_feel, "action-forward combat")
+    loop_phrase = _comma_join((anchor.loop_shape if anchor else []) or axes.loop_shape, "readable run-based structure")
+    summary_parts.append(
+        f"with {pace_phrase}{feel_phrase} and {loop_phrase} as the core alignment."
+    )
+
+    if hard_drifts_to_avoid:
+        summary_parts.append(
+            f"Recommendations should avoid {_comma_join(hard_drifts_to_avoid[:3], 'major structural drift')}."
+        )
+    if axes.presentation_style or (anchor and anchor.presentation_style):
+        summary_parts.append(
+            f"Presentation should feel {_comma_join((anchor.presentation_style if anchor else []) or axes.presentation_style, 'purposeful')}."
+        )
+
+    return RecommendationArchetype(
+        summary=" ".join(summary_parts).strip(),
+        core_experience=core_experience,
+        required_alignment=required_alignment,
+        allowed_novelty_axes=allowed_novelty_axes,
+        hard_drifts_to_avoid=hard_drifts_to_avoid,
+    )
 
 
 def build_reference_anchor_profile(

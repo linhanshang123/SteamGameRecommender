@@ -22,7 +22,7 @@ export default async function HistoryPage() {
             Saved recommendation sessions
           </h1>
           <p className="mt-4 text-base leading-7 text-slate-200/72">
-            Reopen previous prompts, inspect mapped tags, and compare the top-ranked Steam matches over time.
+            Reopen previous prompts, inspect mapped tags, and compare the recommendation angles the system surfaced over time.
           </p>
         </div>
 

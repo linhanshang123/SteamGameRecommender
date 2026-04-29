@@ -2,21 +2,37 @@ from __future__ import annotations
 
 from app.core.supabase import get_supabase_client
 from app.schemas.recommendation import (
+    BucketEvidence,
     GameRow,
     HistoryEntry,
-    ParsedUserIntent,
     RankedRecommendation,
+    RecommendationArchetype,
+    RecommendationBucketType,
+    RecommendationBuckets,
     RecommendationDebugPayload,
     RecommendationResponse,
     RecommendationSessionResponse,
     ScoreBreakdown,
     SessionPayload,
 )
+from app.services.recommendation.experience import build_recommendation_archetype, enrich_intent
 from app.services.recommendation.intent import parse_user_intent
-from app.services.recommendation.experience import enrich_intent
-from app.services.recommendation.reason import fallback_reason, rerank_candidates
+from app.services.recommendation.judgment import judge_bucketed_candidates
 from app.services.recommendation.retrieve import fetch_candidate_games, resolve_reference_games
 from app.services.recommendation.scoring import score_game
+
+
+BUCKET_LIMITS = {
+    RecommendationBucketType.CLOSEST_MATCHES: 2,
+    RecommendationBucketType.SIMILAR_BUT_NOVEL: 2,
+    RecommendationBucketType.NICHE_PICKS: 1,
+}
+
+BUCKET_ORDER = [
+    RecommendationBucketType.CLOSEST_MATCHES,
+    RecommendationBucketType.SIMILAR_BUT_NOVEL,
+    RecommendationBucketType.NICHE_PICKS,
+]
 
 
 def _rows_to_sessions(rows: list[dict]) -> list[SessionPayload]:
@@ -67,6 +83,37 @@ def _normalize_debug_payload(raw: dict | None) -> RecommendationDebugPayload:
     )
 
 
+def _normalize_bucket_evidence(raw: dict | None) -> BucketEvidence:
+    payload = raw or {}
+    return BucketEvidence.model_validate(
+        {
+            "bucket_fit_score": payload.get("bucket_fit_score", 0.0),
+            "novelty_support_score": payload.get("novelty_support_score", 0.0),
+            "niche_conviction_score": payload.get("niche_conviction_score", 0.0),
+        }
+    )
+
+
+def _group_recommendations(recommendations: list[RankedRecommendation]) -> RecommendationBuckets:
+    return RecommendationBuckets(
+        closest_matches=[
+            recommendation
+            for recommendation in recommendations
+            if recommendation.bucket == RecommendationBucketType.CLOSEST_MATCHES
+        ],
+        similar_but_novel=[
+            recommendation
+            for recommendation in recommendations
+            if recommendation.bucket == RecommendationBucketType.SIMILAR_BUT_NOVEL
+        ],
+        niche_picks=[
+            recommendation
+            for recommendation in recommendations
+            if recommendation.bucket == RecommendationBucketType.NICHE_PICKS
+        ],
+    )
+
+
 def fetch_user_history(user_id: str) -> list[SessionPayload]:
     supabase = get_supabase_client()
     response = (
@@ -91,6 +138,7 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
     history = fetch_user_history(user_id)
     resolved_reference_games = resolve_reference_games(intent)
     intent = enrich_intent(intent, resolved_reference_games)
+    archetype = build_recommendation_archetype(intent)
     candidate_pool = fetch_candidate_games(intent, resolved_reference_games)
 
     scored_candidates: list[tuple[GameRow, ScoreBreakdown, RecommendationDebugPayload]] = []
@@ -106,85 +154,68 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
         scored_candidates.append((game, breakdown, debug_payload))
 
     scored_candidates.sort(key=lambda entry: entry[1].deterministic_score, reverse=True)
-    rerank_window = scored_candidates[:20]
-    rerank_map, rerank_error = rerank_candidates(
-        rerank_window,
+    judgment_window = scored_candidates[:24]
+    judgment_map, judgment_error = judge_bucketed_candidates(
+        judgment_window,
         intent,
-        candidate_pool.resolved_reference_games,
+        archetype,
     )
 
-    recommendations: list[RankedRecommendation] = []
-    final_candidates: list[tuple[GameRow, ScoreBreakdown, RecommendationDebugPayload, str, str, float]] = []
+    bucket_candidates: dict[RecommendationBucketType, list[tuple[GameRow, ScoreBreakdown, RecommendationDebugPayload]]] = {
+        bucket: [] for bucket in BUCKET_ORDER
+    }
+    candidate_lookup = {game.appid: (game, breakdown, debug_payload) for game, breakdown, debug_payload in judgment_window}
 
-    for game, breakdown, debug_payload in rerank_window:
-        rerank_item = rerank_map.get(game.appid)
-        dimension_rerank_score = 0.0
-        if rerank_item:
-            dimension_rerank_score = max(
-                0.0,
-                min(
-                    1.0,
-                    0.24 * rerank_item.reference_match_score
-                    + 0.18 * rerank_item.combat_pace_score
-                    + 0.20 * rerank_item.combat_feel_score
-                    + 0.14 * rerank_item.presentation_score
-                    + 0.14 * rerank_item.loop_shape_score
-                    - 0.10 * rerank_item.soft_avoid_penalty_score,
-                ),
+    for appid, decision in judgment_map.items():
+        candidate = candidate_lookup.get(appid)
+        if not candidate:
+            continue
+        game, breakdown, debug_payload = candidate
+        breakdown.llm_match_score = decision.llm_match_score
+        debug_payload.rerank_applied = judgment_error is None
+        debug_payload.rerank_error = judgment_error
+        bucket_candidates[decision.bucket].append((game, breakdown, debug_payload))
+
+    ranked_recommendations: list[RankedRecommendation] = []
+    global_rank = 1
+    for bucket in BUCKET_ORDER:
+        ordered = sorted(
+            bucket_candidates[bucket],
+            key=lambda entry: (
+                judgment_map[entry[0].appid].final_score,
+                entry[1].deterministic_score,
+            ),
+            reverse=True,
+        )[: BUCKET_LIMITS[bucket]]
+        for bucket_rank, (game, breakdown, debug_payload) in enumerate(ordered, start=1):
+            decision = judgment_map[game.appid]
+            ranked_recommendations.append(
+                RankedRecommendation(
+                    appid=game.appid,
+                    name=game.name,
+                    price=game.price,
+                    year=game.year,
+                    tags=game.tags or [],
+                    genres=game.genres or [],
+                    ratingRatio=game.rating_ratio or 0,
+                    finalScore=decision.final_score,
+                    scoreBreakdown=breakdown,
+                    reason=decision.bucket_reason,
+                    concern=decision.concern,
+                    debugPayload=debug_payload,
+                    deterministicScore=breakdown.deterministic_score,
+                    llmMatchScore=breakdown.llm_match_score,
+                    rank=global_rank,
+                    bucket=bucket,
+                    bucketRank=bucket_rank,
+                    bucketReason=decision.bucket_reason,
+                    bucketEvidence=decision.bucket_evidence,
+                    secondaryTraits=decision.secondary_traits,
+                )
             )
-        llm_match_score = (
-            0.50 * rerank_item.llm_match_score + 0.50 * dimension_rerank_score if rerank_item else 0.0
-        )
-        breakdown.llm_match_score = llm_match_score
-        combined_score = 0.45 * breakdown.deterministic_score + 0.55 * llm_match_score
-        if rerank_item:
-            debug_payload.rerank_dimension_scores.reference_match_score = rerank_item.reference_match_score
-            debug_payload.rerank_dimension_scores.combat_pace_score = rerank_item.combat_pace_score
-            debug_payload.rerank_dimension_scores.combat_feel_score = rerank_item.combat_feel_score
-            debug_payload.rerank_dimension_scores.presentation_score = rerank_item.presentation_score
-            debug_payload.rerank_dimension_scores.loop_shape_score = rerank_item.loop_shape_score
-            debug_payload.rerank_dimension_scores.soft_avoid_penalty_score = rerank_item.soft_avoid_penalty_score
-        debug_payload.rerank_applied = rerank_error is None
-        debug_payload.rerank_error = rerank_error
+            global_rank += 1
 
-        if rerank_item and rerank_item.reason:
-            reason = rerank_item.reason
-            concern = rerank_item.concern
-        else:
-            reason, concern = fallback_reason(game, intent, breakdown, debug_payload)
-
-        final_candidates.append(
-            (game, breakdown, debug_payload, reason, concern, combined_score)
-        )
-
-    final_candidates.sort(
-        key=lambda entry: (entry[5], entry[1].deterministic_score),
-        reverse=True,
-    )
-
-    for index, (game, breakdown, debug_payload, reason, concern, combined_score) in enumerate(
-        final_candidates[:5],
-        start=1,
-    ):
-        recommendations.append(
-            RankedRecommendation(
-                appid=game.appid,
-                name=game.name,
-                price=game.price,
-                year=game.year,
-                tags=game.tags or [],
-                genres=game.genres or [],
-                ratingRatio=game.rating_ratio or 0,
-                finalScore=combined_score,
-                scoreBreakdown=breakdown,
-                reason=reason,
-                concern=concern,
-                debugPayload=debug_payload,
-                deterministicScore=breakdown.deterministic_score,
-                llmMatchScore=breakdown.llm_match_score,
-                rank=index,
-            )
-        )
+    buckets = _group_recommendations(ranked_recommendations)
 
     supabase = get_supabase_client()
     session_response = (
@@ -194,6 +225,7 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
                 "user_id": user_id,
                 "prompt": normalized_prompt,
                 "normalized_preferences": intent.model_dump(),
+                "archetype": archetype.model_dump(),
             }
         )
         .execute()
@@ -204,28 +236,36 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
 
     session = SessionPayload.model_validate(session_rows[0])
 
-    supabase.table("recommendation_results").insert(
-        [
-            {
-                "session_id": session.id,
-                "game_appid": recommendation.appid,
-                "rank": recommendation.rank,
-                "reason": recommendation.reason,
-                "concern": recommendation.concern,
-                "score": recommendation.finalScore,
-                "deterministic_score": recommendation.deterministicScore,
-                "llm_match_score": recommendation.llmMatchScore,
-                "score_breakdown": recommendation.scoreBreakdown.model_dump(),
-                "debug_payload": recommendation.debugPayload.model_dump(),
-            }
-            for recommendation in recommendations
-        ]
-    ).execute()
+    if ranked_recommendations:
+        supabase.table("recommendation_results").insert(
+            [
+                {
+                    "session_id": session.id,
+                    "game_appid": recommendation.appid,
+                    "rank": recommendation.rank,
+                    "bucket": recommendation.bucket.value,
+                    "bucket_rank": recommendation.bucketRank,
+                    "bucket_reason": recommendation.bucketReason,
+                    "bucket_evidence": recommendation.bucketEvidence.model_dump(),
+                    "secondary_traits": recommendation.secondaryTraits,
+                    "reason": recommendation.reason,
+                    "concern": recommendation.concern,
+                    "score": recommendation.finalScore,
+                    "deterministic_score": recommendation.deterministicScore,
+                    "llm_match_score": recommendation.llmMatchScore,
+                    "score_breakdown": recommendation.scoreBreakdown.model_dump(),
+                    "debug_payload": recommendation.debugPayload.model_dump(),
+                }
+                for recommendation in ranked_recommendations
+            ]
+        ).execute()
 
     return RecommendationResponse(
         sessionId=session.id,
         intent=intent,
-        recommendations=recommendations,
+        archetype=archetype,
+        buckets=buckets,
+        recommendations=ranked_recommendations,
     )
 
 
@@ -268,13 +308,14 @@ def get_recommendation_session(session_id: str, user_id: str) -> RecommendationS
             for row in (games_response.data or [])
         }
 
-    recommendations = []
+    recommendations: list[RankedRecommendation] = []
     for result in result_rows:
         game = games_map.get(result["game_appid"])
         if not game:
             continue
         score_breakdown = _normalize_score_breakdown(result.get("score_breakdown"), result["score"])
         debug_payload = _normalize_debug_payload(result.get("debug_payload"))
+        bucket_value = result.get("bucket") or RecommendationBucketType.CLOSEST_MATCHES.value
         recommendations.append(
             RankedRecommendation(
                 appid=game.appid,
@@ -286,16 +327,28 @@ def get_recommendation_session(session_id: str, user_id: str) -> RecommendationS
                 ratingRatio=game.rating_ratio or 0,
                 finalScore=result["score"],
                 scoreBreakdown=score_breakdown,
-                reason=result["reason"],
+                reason=result.get("reason") or result.get("bucket_reason") or "",
                 concern=result.get("concern") or "",
                 debugPayload=debug_payload,
                 deterministicScore=result.get("deterministic_score") or score_breakdown.deterministic_score,
                 llmMatchScore=result.get("llm_match_score") or score_breakdown.llm_match_score,
                 rank=result["rank"],
+                bucket=RecommendationBucketType(bucket_value),
+                bucketRank=result.get("bucket_rank") or result["rank"],
+                bucketReason=result.get("bucket_reason") or result.get("reason") or "",
+                bucketEvidence=_normalize_bucket_evidence(result.get("bucket_evidence")),
+                secondaryTraits=result.get("secondary_traits") or [],
             )
         )
 
-    return RecommendationSessionResponse(session=session, recommendations=recommendations)
+    archetype = session.archetype or build_recommendation_archetype(session.normalized_preferences)
+    buckets = _group_recommendations(recommendations)
+    return RecommendationSessionResponse(
+        session=session,
+        archetype=archetype,
+        buckets=buckets,
+        recommendations=recommendations,
+    )
 
 
 def get_recommendation_history(user_id: str) -> list[HistoryEntry]:

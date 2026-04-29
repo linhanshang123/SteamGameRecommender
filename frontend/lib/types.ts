@@ -44,6 +44,19 @@ export type ParsedUserIntent = {
   };
 };
 
+export type RecommendationBucketType =
+  | "closest_matches"
+  | "similar_but_novel"
+  | "niche_picks";
+
+export type RecommendationArchetype = {
+  summary: string;
+  core_experience: string[];
+  required_alignment: string[];
+  allowed_novelty_axes: string[];
+  hard_drifts_to_avoid: string[];
+};
+
 export type ScoreBreakdown = {
   tag_match_score: number;
   text_match_score: number;
@@ -86,6 +99,12 @@ export type RecommendationDebugPayload = {
   rerank_error: string | null;
 };
 
+export type BucketEvidence = {
+  bucket_fit_score: number;
+  novelty_support_score: number;
+  niche_conviction_score: number;
+};
+
 export type RankedRecommendation = {
   appid: string;
   name: string;
@@ -102,6 +121,17 @@ export type RankedRecommendation = {
   deterministicScore: number;
   llmMatchScore: number;
   rank: number;
+  bucket?: RecommendationBucketType;
+  bucketRank?: number;
+  bucketReason?: string;
+  bucketEvidence?: BucketEvidence;
+  secondaryTraits?: string[];
+};
+
+export type RecommendationBuckets = {
+  closest_matches: RankedRecommendation[];
+  similar_but_novel: RankedRecommendation[];
+  niche_picks: RankedRecommendation[];
 };
 
 export type GameRow = {
@@ -132,6 +162,7 @@ export type RecommendationSessionRow = {
   user_id: string;
   prompt: string;
   normalized_preferences: ParsedUserIntent;
+  archetype?: RecommendationArchetype | null;
   created_at: string;
 };
 
@@ -142,11 +173,15 @@ export type HistoryEntry = RecommendationSessionRow & {
 export type RecommendationResponse = {
   sessionId: string;
   intent: ParsedUserIntent;
+  archetype?: RecommendationArchetype;
+  buckets?: RecommendationBuckets;
   recommendations: RankedRecommendation[];
 };
 
 export type RecommendationSessionResponse = {
   session: RecommendationSessionRow;
+  archetype?: RecommendationArchetype;
+  buckets?: RecommendationBuckets;
   recommendations: RankedRecommendation[];
 };
 
@@ -160,6 +195,11 @@ export type RecommendationResultRow = {
   score: number;
   deterministic_score: number | null;
   llm_match_score: number | null;
+  bucket: RecommendationBucketType | null;
+  bucket_rank: number | null;
+  bucket_reason: string | null;
+  bucket_evidence: BucketEvidence | null;
+  secondary_traits: string[] | null;
   score_breakdown: ScoreBreakdown;
   debug_payload: RecommendationDebugPayload | null;
   created_at: string;
