@@ -178,7 +178,15 @@ def fetch_candidate_games(intent: ParsedUserIntent, resolved_reference_games: li
             "genres",
         )
 
-    query_tokens = tokenize(intent.free_text_intent)[:8]
+    query_tokens = _dedupe_tokens(
+        [
+            *tokenize(intent.free_text_intent),
+            *tokenize(" ".join(intent.must_have)),
+            *tokenize(" ".join(intent.nice_to_have)),
+            *tokenize(" ".join((intent.reference_anchor_profile.derived_tags if intent.reference_anchor_profile else []))),
+            *tokenize(intent.reference_anchor_profile.summary if intent.reference_anchor_profile else ""),
+        ]
+    )[:10]
     if query_tokens:
         text_clause = _text_search_clause(query_tokens)
         if text_clause:
@@ -204,6 +212,8 @@ def fetch_candidate_games(intent: ParsedUserIntent, resolved_reference_games: li
                 for value in [*(game.tags or []), *(game.genres or [])]
             }
         )
+        if intent.reference_anchor_profile:
+            reference_tags = sorted({*reference_tags, *intent.reference_anchor_profile.derived_tags})
         reference_genres = sorted(
             {
                 value
@@ -211,13 +221,14 @@ def fetch_candidate_games(intent: ParsedUserIntent, resolved_reference_games: li
                 for value in (game.genres or [])
             }
         )
-        reference_context_tokens = sorted(
+        reference_context_tokens = _dedupe_tokens(
             {
                 token
                 for game in resolved_reference_games
                 for token in tokenize(game.llm_context or "")
             }
-        )[:8]
+            | set(tokenize(intent.reference_anchor_profile.summary if intent.reference_anchor_profile else ""))
+        )[:10]
 
         if reference_tags:
             reference_tag_response = (
@@ -314,3 +325,15 @@ def fetch_candidate_games(intent: ParsedUserIntent, resolved_reference_games: li
         retrieval_routes=route_payload,
         resolved_reference_games=resolved_reference_games,
     )
+
+
+def _dedupe_tokens(values: list[str] | set[str]) -> list[str]:
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        lowered = value.lower()
+        if lowered in seen:
+            continue
+        seen.add(lowered)
+        ordered.append(value)
+    return ordered

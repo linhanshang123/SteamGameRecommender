@@ -10,12 +10,42 @@ class IntentConstraints(BaseModel):
     multiplayer: bool | None = None
 
 
+class ExperienceAxes(BaseModel):
+    combat_pace: str | None = None
+    combat_feel: list[str] = Field(default_factory=list)
+    presentation_style: list[str] = Field(default_factory=list)
+    loop_shape: list[str] = Field(default_factory=list)
+    difficulty_tolerance: str | None = None
+
+
+class SoftAvoids(BaseModel):
+    strategy_heavy: bool = False
+    slow_combat: bool = False
+    clunky_feel: bool = False
+    shooter_dominant: bool = False
+
+
+class ReferenceAnchorProfile(BaseModel):
+    anchor_names: list[str] = Field(default_factory=list)
+    derived_tags: list[str] = Field(default_factory=list)
+    combat_pace: str | None = None
+    combat_feel: list[str] = Field(default_factory=list)
+    presentation_style: list[str] = Field(default_factory=list)
+    loop_shape: list[str] = Field(default_factory=list)
+    summary: str = ""
+
+
 class ParsedUserIntent(BaseModel):
     preferred_tags: list[str] = Field(default_factory=list)
     avoid_tags: list[str] = Field(default_factory=list)
     reference_games: list[str] = Field(default_factory=list)
     include_reference_games: bool = False
     free_text_intent: str = ""
+    experience_axes: ExperienceAxes = Field(default_factory=ExperienceAxes)
+    implicit_soft_avoids: SoftAvoids = Field(default_factory=SoftAvoids)
+    must_have: list[str] = Field(default_factory=list)
+    nice_to_have: list[str] = Field(default_factory=list)
+    reference_anchor_profile: ReferenceAnchorProfile | None = None
     constraints: IntentConstraints | None = None
 
 
@@ -23,12 +53,30 @@ class ScoreBreakdown(BaseModel):
     tag_match_score: float
     text_match_score: float
     reference_similarity_score: float
+    combat_pace_match_score: float
+    combat_feel_match_score: float
+    presentation_match_score: float
+    loop_shape_match_score: float
     rating_confidence_score: float
     popularity_reliability_score: float
     preference_history_score: float | None = None
     avoid_penalty: float
+    strategy_heavy_penalty: float
+    slow_combat_penalty: float
+    clunky_feel_penalty: float
+    shooter_dominant_penalty: float
+    soft_avoid_penalty_score: float
     deterministic_score: float
     llm_match_score: float
+
+
+class RerankDimensionScores(BaseModel):
+    reference_match_score: float = 0.0
+    combat_pace_score: float = 0.0
+    combat_feel_score: float = 0.0
+    presentation_score: float = 0.0
+    loop_shape_score: float = 0.0
+    soft_avoid_penalty_score: float = 0.0
 
 
 class RecommendationDebugPayload(BaseModel):
@@ -37,12 +85,22 @@ class RecommendationDebugPayload(BaseModel):
     text_matched_terms: list[str] = Field(default_factory=list)
     resolved_reference_appids: list[str] = Field(default_factory=list)
     retrieval_routes: list[str] = Field(default_factory=list)
+    experience_axes: ExperienceAxes = Field(default_factory=ExperienceAxes)
+    implicit_soft_avoids: SoftAvoids = Field(default_factory=SoftAvoids)
+    reference_anchor_profile: ReferenceAnchorProfile | None = None
+    rerank_dimension_scores: RerankDimensionScores = Field(default_factory=RerankDimensionScores)
     rerank_applied: bool = False
     rerank_error: str | None = None
 
 
 class LlmRerankItem(BaseModel):
     appid: str
+    reference_match_score: float = 0.0
+    combat_pace_score: float = 0.0
+    combat_feel_score: float = 0.0
+    presentation_score: float = 0.0
+    loop_shape_score: float = 0.0
+    soft_avoid_penalty_score: float = 0.0
     llm_match_score: float = 0.0
     reason: str = ""
     concern: str = ""

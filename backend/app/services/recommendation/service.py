@@ -13,6 +13,7 @@ from app.schemas.recommendation import (
     SessionPayload,
 )
 from app.services.recommendation.intent import parse_user_intent
+from app.services.recommendation.experience import enrich_intent
 from app.services.recommendation.reason import fallback_reason, rerank_candidates
 from app.services.recommendation.retrieve import fetch_candidate_games, resolve_reference_games
 from app.services.recommendation.scoring import score_game
@@ -29,10 +30,19 @@ def _normalize_score_breakdown(raw: dict | None, score: float) -> ScoreBreakdown
             "tag_match_score": payload.get("tag_match_score", 0.0),
             "text_match_score": payload.get("text_match_score", 0.0),
             "reference_similarity_score": payload.get("reference_similarity_score", 0.0),
+            "combat_pace_match_score": payload.get("combat_pace_match_score", 0.0),
+            "combat_feel_match_score": payload.get("combat_feel_match_score", 0.0),
+            "presentation_match_score": payload.get("presentation_match_score", 0.0),
+            "loop_shape_match_score": payload.get("loop_shape_match_score", 0.0),
             "rating_confidence_score": payload.get("rating_confidence_score", 0.0),
             "popularity_reliability_score": payload.get("popularity_reliability_score", 0.0),
             "preference_history_score": payload.get("preference_history_score"),
             "avoid_penalty": payload.get("avoid_penalty", 0.0),
+            "strategy_heavy_penalty": payload.get("strategy_heavy_penalty", 0.0),
+            "slow_combat_penalty": payload.get("slow_combat_penalty", 0.0),
+            "clunky_feel_penalty": payload.get("clunky_feel_penalty", 0.0),
+            "shooter_dominant_penalty": payload.get("shooter_dominant_penalty", 0.0),
+            "soft_avoid_penalty_score": payload.get("soft_avoid_penalty_score", 0.0),
             "deterministic_score": payload.get("deterministic_score", score),
             "llm_match_score": payload.get("llm_match_score", 0.0),
         }
@@ -47,6 +57,10 @@ def _normalize_debug_payload(raw: dict | None) -> RecommendationDebugPayload:
             "text_matched_terms": (raw or {}).get("text_matched_terms", []),
             "resolved_reference_appids": (raw or {}).get("resolved_reference_appids", []),
             "retrieval_routes": (raw or {}).get("retrieval_routes", []),
+            "experience_axes": (raw or {}).get("experience_axes", {}),
+            "implicit_soft_avoids": (raw or {}).get("implicit_soft_avoids", {}),
+            "reference_anchor_profile": (raw or {}).get("reference_anchor_profile"),
+            "rerank_dimension_scores": (raw or {}).get("rerank_dimension_scores", {}),
             "rerank_applied": (raw or {}).get("rerank_applied", False),
             "rerank_error": (raw or {}).get("rerank_error"),
         }
@@ -76,6 +90,7 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
     intent = parse_user_intent(normalized_prompt)
     history = fetch_user_history(user_id)
     resolved_reference_games = resolve_reference_games(intent)
+    intent = enrich_intent(intent, resolved_reference_games)
     candidate_pool = fetch_candidate_games(intent, resolved_reference_games)
 
     scored_candidates: list[tuple[GameRow, ScoreBreakdown, RecommendationDebugPayload]] = []
@@ -103,9 +118,32 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
 
     for game, breakdown, debug_payload in rerank_window:
         rerank_item = rerank_map.get(game.appid)
-        llm_match_score = rerank_item.llm_match_score if rerank_item else 0.0
+        dimension_rerank_score = 0.0
+        if rerank_item:
+            dimension_rerank_score = max(
+                0.0,
+                min(
+                    1.0,
+                    0.24 * rerank_item.reference_match_score
+                    + 0.18 * rerank_item.combat_pace_score
+                    + 0.20 * rerank_item.combat_feel_score
+                    + 0.14 * rerank_item.presentation_score
+                    + 0.14 * rerank_item.loop_shape_score
+                    - 0.10 * rerank_item.soft_avoid_penalty_score,
+                ),
+            )
+        llm_match_score = (
+            0.50 * rerank_item.llm_match_score + 0.50 * dimension_rerank_score if rerank_item else 0.0
+        )
         breakdown.llm_match_score = llm_match_score
-        combined_score = 0.50 * breakdown.deterministic_score + 0.50 * llm_match_score
+        combined_score = 0.45 * breakdown.deterministic_score + 0.55 * llm_match_score
+        if rerank_item:
+            debug_payload.rerank_dimension_scores.reference_match_score = rerank_item.reference_match_score
+            debug_payload.rerank_dimension_scores.combat_pace_score = rerank_item.combat_pace_score
+            debug_payload.rerank_dimension_scores.combat_feel_score = rerank_item.combat_feel_score
+            debug_payload.rerank_dimension_scores.presentation_score = rerank_item.presentation_score
+            debug_payload.rerank_dimension_scores.loop_shape_score = rerank_item.loop_shape_score
+            debug_payload.rerank_dimension_scores.soft_avoid_penalty_score = rerank_item.soft_avoid_penalty_score
         debug_payload.rerank_applied = rerank_error is None
         debug_payload.rerank_error = rerank_error
 

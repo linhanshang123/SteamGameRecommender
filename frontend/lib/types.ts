@@ -12,6 +12,30 @@ export type ParsedUserIntent = {
   reference_games: string[];
   include_reference_games: boolean;
   free_text_intent: string;
+  experience_axes: {
+    combat_pace?: string | null;
+    combat_feel: string[];
+    presentation_style: string[];
+    loop_shape: string[];
+    difficulty_tolerance?: string | null;
+  };
+  implicit_soft_avoids: {
+    strategy_heavy: boolean;
+    slow_combat: boolean;
+    clunky_feel: boolean;
+    shooter_dominant: boolean;
+  };
+  must_have: string[];
+  nice_to_have: string[];
+  reference_anchor_profile?: {
+    anchor_names: string[];
+    derived_tags: string[];
+    combat_pace?: string | null;
+    combat_feel: string[];
+    presentation_style: string[];
+    loop_shape: string[];
+    summary: string;
+  } | null;
   constraints?: {
     price_max?: number;
     year_min?: number;
@@ -24,10 +48,19 @@ export type ScoreBreakdown = {
   tag_match_score: number;
   text_match_score: number;
   reference_similarity_score: number;
+  combat_pace_match_score: number;
+  combat_feel_match_score: number;
+  presentation_match_score: number;
+  loop_shape_match_score: number;
   rating_confidence_score: number;
   popularity_reliability_score: number;
   preference_history_score?: number;
   avoid_penalty: number;
+  strategy_heavy_penalty: number;
+  slow_combat_penalty: number;
+  clunky_feel_penalty: number;
+  shooter_dominant_penalty: number;
+  soft_avoid_penalty_score: number;
   deterministic_score: number;
   llm_match_score: number;
 };
@@ -38,6 +71,17 @@ export type RecommendationDebugPayload = {
   text_matched_terms: string[];
   resolved_reference_appids: string[];
   retrieval_routes: string[];
+  experience_axes: ParsedUserIntent["experience_axes"];
+  implicit_soft_avoids: ParsedUserIntent["implicit_soft_avoids"];
+  reference_anchor_profile: ParsedUserIntent["reference_anchor_profile"];
+  rerank_dimension_scores: {
+    reference_match_score: number;
+    combat_pace_score: number;
+    combat_feel_score: number;
+    presentation_score: number;
+    loop_shape_score: number;
+    soft_avoid_penalty_score: number;
+  };
   rerank_applied: boolean;
   rerank_error: string | null;
 };
