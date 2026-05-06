@@ -55,6 +55,12 @@ export async function SiteHeader() {
           </SignUpButton>
         </SignedOut>
         <SignedIn>
+          <Link
+            href="/profile"
+            className="rounded-full border border-white/12 bg-white/8 px-4 py-2 text-sm text-white transition hover:bg-white/12"
+          >
+            Profile
+          </Link>
           {steamAccount?.linked ? (
             <a
               href={steamAccount.profileUrl ?? "/"}
