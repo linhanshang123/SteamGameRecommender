@@ -16,6 +16,10 @@ def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(maximum, value))
 
 
+def game_text_blob(game: GameRow) -> str:
+    return game.embedding_text or game.llm_context or ""
+
+
 def dedupe_lowered(values: list[str]) -> list[str]:
     seen: set[str] = set()
     deduped: list[str] = []
@@ -85,7 +89,7 @@ def reference_similarity_score(game: GameRow, resolved_reference_games: list[Gam
         [
             token
             for reference_game in resolved_reference_games
-            for token in tokenize(reference_game.llm_context or "")
+            for token in tokenize(game_text_blob(reference_game))
         ]
     )[:10]
     tag_recall = recall_score(
@@ -93,7 +97,7 @@ def reference_similarity_score(game: GameRow, resolved_reference_games: list[Gam
         reference_terms,
     )
     text_recall = recall_score(
-        matched_terms(reference_context_terms, tokenize(f"{game.name} {game.llm_context or ''}")),
+        matched_terms(reference_context_terms, tokenize(f"{game.name} {game_text_blob(game)}")),
         reference_context_terms,
     )
     return clamp(0.7 * tag_recall + 0.3 * text_recall)
@@ -108,7 +112,7 @@ def score_game(
 ) -> tuple[float, ScoreBreakdown, RecommendationDebugPayload]:
     game_tag_pool = normalized_tag_pool(game)
     query_tokens = tokenize(intent.free_text_intent)
-    game_text_tokens = tokenize(f"{game.name} {game.llm_context or ''}")
+    game_text_tokens = tokenize(f"{game.name} {game_text_blob(game)}")
 
     matched_preferred_tags = matched_terms(intent.preferred_tags, game_tag_pool)
     matched_avoid_tags = matched_terms(intent.avoid_tags, game_tag_pool)

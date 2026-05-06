@@ -91,7 +91,23 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
         scored_candidates.append((game, breakdown, debug_payload))
 
     scored_candidates.sort(key=lambda entry: entry[1].deterministic_score, reverse=True)
-    rerank_window = scored_candidates[:20]
+    vector_candidates = sorted(
+        scored_candidates,
+        key=lambda entry: candidate_pool.retrieval_scores.get(entry[0].appid, 0.0),
+        reverse=True,
+    )[:20]
+    rerank_candidates_by_appid = {
+        game.appid: (game, breakdown, debug_payload)
+        for game, breakdown, debug_payload in [*scored_candidates[:20], *vector_candidates]
+    }
+    rerank_window = sorted(
+        rerank_candidates_by_appid.values(),
+        key=lambda entry: (
+            entry[1].deterministic_score
+            + 0.15 * candidate_pool.retrieval_scores.get(entry[0].appid, 0.0)
+        ),
+        reverse=True,
+    )[:20]
     rerank_map, rerank_error = rerank_candidates(
         rerank_window,
         intent,

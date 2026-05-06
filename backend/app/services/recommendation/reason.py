@@ -19,6 +19,10 @@ def clamp(value: float, minimum: float = 0.0, maximum: float = 1.0) -> float:
     return max(minimum, min(maximum, value))
 
 
+def game_text_blob(game: GameRow) -> str:
+    return game.embedding_text or game.llm_context or ""
+
+
 def fallback_reason(
     game: GameRow,
     intent: ParsedUserIntent,
@@ -59,7 +63,7 @@ def rerank_candidates(
             "name": game.name,
             "tags": game.tags or [],
             "genres": game.genres or [],
-            "llm_context": (game.llm_context or "")[:500],
+            "llm_context": game_text_blob(game)[:500],
             "deterministic_score": breakdown.deterministic_score,
             "matched_preferred_tags": debug_payload.matched_preferred_tags,
             "text_matched_terms": debug_payload.text_matched_terms,
@@ -73,7 +77,7 @@ def rerank_candidates(
             "name": game.name,
             "tags": game.tags or [],
             "genres": game.genres or [],
-            "llm_context": (game.llm_context or "")[:350],
+            "llm_context": game_text_blob(game)[:350],
         }
         for game in resolved_reference_games
     ]
@@ -90,6 +94,7 @@ def rerank_candidates(
                     "system",
                     "You rerank Steam game candidates. You may score only the provided candidates and must not invent or rename any game. "
                     "Return valid JSON only with a top-level object shaped like {\"results\":[...]} and no markdown fences. "
+                    "Return each appid exactly as provided in the candidate list, preserving it as the same string ID. "
                     "llm_match_score must be a number from 0.0 to 1.0. "
                     "reason should be one concise sentence about why the game matches. "
                     "concern should be one concise sentence about any mismatch or risk, or an empty string if none.",
@@ -114,9 +119,17 @@ def rerank_candidates(
         if normalized_content.startswith("```"):
             normalized_content = normalized_content.strip("`")
             normalized_content = normalized_content.removeprefix("json").strip()
-        response_payload = LlmRerankResponse.model_validate(json.loads(normalized_content))
+        try:
+            parsed_payload = json.loads(normalized_content)
+        except json.JSONDecodeError as exc:
+            return {}, f"Reranker returned invalid JSON: {exc}"
+
+        try:
+            response_payload = LlmRerankResponse.model_validate(parsed_payload)
+        except Exception as exc:
+            return {}, f"Reranker returned an invalid response payload: {exc}"
     except Exception as exc:
-        return {}, str(exc)
+        return {}, f"Reranker request failed: {exc}"
 
     allowed_appids = {game.appid for game, _, _ in candidates}
     reranked: dict[str, LlmRerankItem] = {}

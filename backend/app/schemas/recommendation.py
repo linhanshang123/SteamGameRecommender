@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class IntentConstraints(BaseModel):
@@ -46,6 +46,20 @@ class LlmRerankItem(BaseModel):
     llm_match_score: float = 0.0
     reason: str = ""
     concern: str = ""
+
+    @field_validator("appid", mode="before")
+    @classmethod
+    def normalize_appid(cls, value: object) -> str:
+        if isinstance(value, bool):
+            raise ValueError("appid must be a string or integer.")
+        if isinstance(value, int):
+            return str(value)
+        if isinstance(value, str):
+            normalized = value.strip()
+            if not normalized:
+                raise ValueError("appid cannot be blank.")
+            return normalized
+        raise ValueError("appid must be a string or integer.")
 
 
 class LlmRerankResponse(BaseModel):
@@ -114,6 +128,7 @@ class GameRow(BaseModel):
     average_playtime_forever: int | None = None
     metacritic_score: int | None = None
     llm_context: str | None = None
+    embedding_text: str | None = None
     data_source: str | None = None
     source_updated_at: str | None = None
     created_at: str | None = None
