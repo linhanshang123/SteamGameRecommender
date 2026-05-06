@@ -4,6 +4,7 @@ from app.core.supabase import get_supabase_client
 from app.schemas.recommendation import (
     GameRow,
     HistoryEntry,
+    IntentConstraints,
     ParsedUserIntent,
     RankedRecommendation,
     RecommendationDebugPayload,
@@ -16,6 +17,7 @@ from app.services.recommendation.intent import parse_user_intent
 from app.services.recommendation.reason import fallback_reason, rerank_candidates
 from app.services.recommendation.retrieve import fetch_candidate_games, resolve_reference_games
 from app.services.recommendation.scoring import score_game
+from app.services.steam import fetch_owned_appids_for_user
 
 
 def _rows_to_sessions(rows: list[dict]) -> list[SessionPayload]:
@@ -66,7 +68,28 @@ def fetch_user_history(user_id: str) -> list[SessionPayload]:
     return _rows_to_sessions(response.data or [])
 
 
-def create_recommendation_session(prompt: str, user_id: str) -> RecommendationResponse:
+def _merge_constraints(
+    parsed: IntentConstraints | None,
+    override: IntentConstraints | None,
+) -> IntentConstraints | None:
+    if parsed is None and override is None:
+        return None
+
+    merged = IntentConstraints(
+        price_max=override.price_max if override and override.price_max is not None else parsed.price_max if parsed else None,
+        year_min=override.year_min if override and override.year_min is not None else parsed.year_min if parsed else None,
+        single_player=override.single_player if override and override.single_player is not None else parsed.single_player if parsed else None,
+        multiplayer=override.multiplayer if override and override.multiplayer is not None else parsed.multiplayer if parsed else None,
+        min_total_reviews=override.min_total_reviews if override and override.min_total_reviews is not None else parsed.min_total_reviews if parsed else None,
+    )
+    return merged if any(value is not None for value in merged.model_dump().values()) else None
+
+
+def create_recommendation_session(
+    prompt: str,
+    user_id: str,
+    request_constraints: IntentConstraints | None = None,
+) -> RecommendationResponse:
     normalized_prompt = prompt.strip()
     if not normalized_prompt:
         raise ValueError("Prompt is required.")
@@ -74,9 +97,16 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
         raise ValueError("Prompt must be shorter than 800 characters.")
 
     intent = parse_user_intent(normalized_prompt)
+    intent.constraints = _merge_constraints(intent.constraints, request_constraints)
     history = fetch_user_history(user_id)
     resolved_reference_games = resolve_reference_games(intent)
-    candidate_pool = fetch_candidate_games(intent, resolved_reference_games)
+    owned_appids = fetch_owned_appids_for_user(user_id)
+    candidate_pool = fetch_candidate_games(
+        intent,
+        resolved_reference_games,
+        blocked_appids=owned_appids,
+        ownership_filtered_user_id=user_id if owned_appids else None,
+    )
 
     scored_candidates: list[tuple[GameRow, ScoreBreakdown, RecommendationDebugPayload]] = []
     for game in candidate_pool.candidates:
@@ -150,6 +180,7 @@ def create_recommendation_session(prompt: str, user_id: str) -> RecommendationRe
                 name=game.name,
                 price=game.price,
                 year=game.year,
+                totalReviews=game.total_reviews,
                 tags=game.tags or [],
                 genres=game.genres or [],
                 ratingRatio=game.rating_ratio or 0,
@@ -259,6 +290,7 @@ def get_recommendation_session(session_id: str, user_id: str) -> RecommendationS
                 name=game.name,
                 price=game.price,
                 year=game.year,
+                totalReviews=game.total_reviews,
                 tags=game.tags or [],
                 genres=game.genres or [],
                 ratingRatio=game.rating_ratio or 0,

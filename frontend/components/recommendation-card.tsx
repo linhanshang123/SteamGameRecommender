@@ -4,12 +4,23 @@ function steamHeaderImage(appid: string) {
   return `https://shared.cloudflare.steamstatic.com/store_item_assets/steam/apps/${appid}/header.jpg`;
 }
 
+function steamStoreUrl(appid: string) {
+  return `https://store.steampowered.com/app/${appid}/`;
+}
+
 function formatPrice(price: number | null) {
   if (price === null || price === 0) {
     return price === 0 ? "Free" : "N/A";
   }
 
   return `$${price.toFixed(2)}`;
+}
+
+function formatReviewCount(totalReviews: number | null) {
+  return new Intl.NumberFormat("en-US", {
+    notation: totalReviews && totalReviews >= 1000 ? "compact" : "standard",
+    maximumFractionDigits: 1,
+  }).format(totalReviews ?? 0);
 }
 
 export function RecommendationCard({
@@ -62,9 +73,19 @@ export function RecommendationCard({
 
         <p className="text-sm leading-6 text-slate-200/86">{recommendation.reason}</p>
 
+        <a
+          href={steamStoreUrl(recommendation.appid)}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="inline-flex items-center justify-center rounded-full border border-cyan-200/20 bg-cyan-100/8 px-4 py-2 text-sm font-medium text-cyan-100 transition hover:border-cyan-200/35 hover:bg-cyan-100/14"
+          aria-label={`View ${recommendation.name} on Steam`}
+        >
+          View on Steam
+        </a>
+
         <dl className="grid grid-cols-2 gap-3 text-sm text-slate-300/80 md:grid-cols-3">
           <div className="rounded-2xl border border-white/8 bg-white/4 px-3 py-3">
-            <dt className="text-xs uppercase tracking-[0.18em] text-slate-400">Reviews</dt>
+            <dt className="text-xs uppercase tracking-[0.18em] text-slate-400">Rating</dt>
             <dd className="mt-1 text-white">
               {(recommendation.ratingRatio * 100).toFixed(0)}%
             </dd>
@@ -76,9 +97,9 @@ export function RecommendationCard({
             </dd>
           </div>
           <div className="rounded-2xl border border-white/8 bg-white/4 px-3 py-3">
-            <dt className="text-xs uppercase tracking-[0.18em] text-slate-400">Text fit</dt>
+            <dt className="text-xs uppercase tracking-[0.18em] text-slate-400">Review count</dt>
             <dd className="mt-1 text-white">
-              {(recommendation.scoreBreakdown.text_match_score * 100).toFixed(0)}%
+              {formatReviewCount(recommendation.totalReviews)}
             </dd>
           </div>
         </dl>

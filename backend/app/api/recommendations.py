@@ -27,7 +27,11 @@ def create_recommendation(
     x_user_id: str | None = Header(default=None),
 ) -> RecommendationResponse:
     try:
-        return create_recommendation_session(request.prompt, require_user_id(x_user_id))
+        return create_recommendation_session(
+            request.prompt,
+            require_user_id(x_user_id),
+            request.constraints,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

@@ -17,6 +17,7 @@ export default async function RecommendationSessionPage({
 
   const { sessionId } = await params;
   const session = await fetchRecommendationSession(sessionId, userId);
+  const minTotalReviews = session.session.normalized_preferences.constraints?.min_total_reviews;
 
   return (
     <main className="min-h-screen pb-16">
@@ -36,6 +37,11 @@ export default async function RecommendationSessionPage({
                 {tag}
               </span>
             ))}
+            {minTotalReviews ? (
+              <span className="rounded-full border border-emerald-200/16 bg-emerald-100/8 px-3 py-1 text-xs text-emerald-50/92">
+                {minTotalReviews}+ reviews
+              </span>
+            ) : null}
             {!session.session.normalized_preferences.preferred_tags.length ? (
               <span className="text-sm text-slate-300/72">
                 No exact Steam tags were extracted, so text fit carries more weight here.

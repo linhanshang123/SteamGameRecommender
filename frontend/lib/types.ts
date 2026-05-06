@@ -6,18 +6,21 @@ export type Json =
   | { [key: string]: Json | undefined }
   | Json[];
 
+export type IntentConstraints = {
+  price_max?: number;
+  year_min?: number;
+  single_player?: boolean;
+  multiplayer?: boolean;
+  min_total_reviews?: number;
+};
+
 export type ParsedUserIntent = {
   preferred_tags: string[];
   avoid_tags: string[];
   reference_games: string[];
   include_reference_games: boolean;
   free_text_intent: string;
-  constraints?: {
-    price_max?: number;
-    year_min?: number;
-    single_player?: boolean;
-    multiplayer?: boolean;
-  };
+  constraints?: IntentConstraints;
 };
 
 export type ScoreBreakdown = {
@@ -47,6 +50,7 @@ export type RankedRecommendation = {
   name: string;
   price: number | null;
   year: number | null;
+  totalReviews: number | null;
   tags: string[];
   genres: string[];
   ratingRatio: number;
@@ -99,6 +103,21 @@ export type RecommendationResponse = {
   sessionId: string;
   intent: ParsedUserIntent;
   recommendations: RankedRecommendation[];
+};
+
+export type RecommendationRequest = {
+  prompt: string;
+  constraints?: IntentConstraints;
+};
+
+export type SteamAccountStatus = {
+  linked: boolean;
+  steamId: string | null;
+  profileUrl: string | null;
+  ownershipSyncStatus: string | null;
+  ownershipSyncError: string | null;
+  ownedGameCount: number;
+  lastSyncAt: string | null;
 };
 
 export type RecommendationSessionResponse = {

@@ -34,6 +34,7 @@ class Settings:
     openai_api_key: str
     openai_embedding_model: str
     openai_embedding_dimensions: int
+    steam_web_api_key: str
     clerk_secret_key: str
     cors_origins: list[str]
 
@@ -53,6 +54,7 @@ def get_settings() -> Settings:
         openai_api_key=os.getenv("OPENAI_API_KEY", ""),
         openai_embedding_model=os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-large"),
         openai_embedding_dimensions=parse_int_env("OPENAI_EMBEDDING_DIMENSIONS", 3072),
+        steam_web_api_key=os.getenv("STEAM_WEB_API_KEY", ""),
         clerk_secret_key=os.getenv("CLERK_SECRET_KEY", ""),
         cors_origins=cors_origins,
     )

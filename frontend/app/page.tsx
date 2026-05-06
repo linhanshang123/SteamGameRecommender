@@ -2,7 +2,13 @@ import { SignedIn, SignedOut, SignInButton, SignUpButton } from "@clerk/nextjs";
 import { SearchForm } from "@/components/search-form";
 import { SiteHeader } from "@/components/site-header";
 
-export default function HomePage() {
+export default async function HomePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ steam?: string }>;
+}) {
+  const { steam } = await searchParams;
+
   return (
     <main className="min-h-screen overflow-hidden">
       <div className="absolute inset-x-0 top-24 mx-auto h-[520px] max-w-5xl rounded-full bg-[radial-gradient(circle,_rgba(172,126,255,0.32),_transparent_44%)] blur-3xl" />
@@ -11,6 +17,17 @@ export default function HomePage() {
       <SiteHeader />
 
       <section className="relative z-10 mx-auto flex max-w-7xl flex-col px-6 pb-24 pt-10 lg:px-10 lg:pt-14">
+        {steam === "connected" ? (
+          <div className="panel mx-auto mb-6 w-full max-w-4xl rounded-2xl border border-emerald-200/18 bg-emerald-100/8 px-5 py-4 text-sm text-emerald-50">
+            Steam account linked. Future recommendation requests will exclude owned games by default.
+          </div>
+        ) : null}
+        {steam === "error" ? (
+          <div className="panel mx-auto mb-6 w-full max-w-4xl rounded-2xl border border-rose-200/18 bg-rose-100/8 px-5 py-4 text-sm text-rose-100">
+            Steam linking failed. Try again, and make sure the app can reach the backend and Steam OpenID.
+          </div>
+        ) : null}
+
         <div className="mx-auto max-w-4xl text-center">
           <p className="text-sm uppercase tracking-[0.4em] text-slate-300/62">SteamRecommender</p>
           <h1 className="text-balance mt-6 text-5xl font-semibold tracking-[-0.05em] text-white md:text-7xl">

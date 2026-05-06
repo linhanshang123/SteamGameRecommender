@@ -36,8 +36,12 @@ def _upsert_candidates(
     route_map: dict[str, set[str]],
     games: list[GameRow],
     route_name: str,
+    blocked_appids: set[str] | None = None,
 ) -> None:
+    blocked = blocked_appids or set()
     for game in games:
+        if game.appid in blocked:
+            continue
         merged.setdefault(game.appid, game)
         route_map.setdefault(game.appid, set()).add(route_name)
 
@@ -62,6 +66,13 @@ def _pretrim_score(game: GameRow, routes: set[str]) -> float:
 def _apply_constraints(games: list[GameRow], intent: ParsedUserIntent) -> list[GameRow]:
     candidates = games
     constraints = intent.constraints
+    if constraints and constraints.min_total_reviews is not None:
+        candidates = [
+            game
+            for game in candidates
+            if (game.total_reviews or 0) >= constraints.min_total_reviews
+        ]
+
     if constraints and constraints.price_max is not None:
         candidates = [
             game for game in candidates if game.price is None or game.price <= constraints.price_max
@@ -91,6 +102,13 @@ def _apply_constraints(games: list[GameRow], intent: ParsedUserIntent) -> list[G
         ]
 
     return candidates
+
+
+def _apply_route_filters(query, intent: ParsedUserIntent):
+    constraints = intent.constraints
+    if constraints and constraints.min_total_reviews is not None:
+        query = query.gte("total_reviews", constraints.min_total_reviews)
+    return query
 
 
 def _text_search_clause(tokens: list[str]) -> str:
@@ -156,7 +174,11 @@ def resolve_reference_games(intent: ParsedUserIntent) -> list[GameRow]:
     return resolved
 
 
-def fetch_embedding_candidates(supabase, intent: ParsedUserIntent) -> tuple[list[GameRow], dict[str, float]]:
+def fetch_embedding_candidates(
+    supabase,
+    intent: ParsedUserIntent,
+    ownership_filtered_user_id: str | None = None,
+) -> tuple[list[GameRow], dict[str, float]]:
     query_text = intent.free_text_intent.strip()
     if not query_text:
         return [], {}
@@ -167,11 +189,18 @@ def fetch_embedding_candidates(supabase, intent: ParsedUserIntent) -> tuple[list
 
     try:
         query_embedding = create_query_embedding(query_text, settings)
+        minimum_total_reviews = (
+            intent.constraints.min_total_reviews
+            if intent.constraints and intent.constraints.min_total_reviews is not None
+            else None
+        )
         match_response = supabase.rpc(
             "match_games_by_embedding",
             {
                 "query_embedding": query_embedding,
                 "match_count": VECTOR_RETRIEVAL_LIMIT,
+                "minimum_total_reviews": minimum_total_reviews,
+                "excluded_user_id": ownership_filtered_user_id,
             },
         ).execute()
     except Exception:
@@ -188,76 +217,87 @@ def fetch_embedding_candidates(supabase, intent: ParsedUserIntent) -> tuple[list
         if row.get("appid")
     }
 
-    games_response = (
+    games_query = (
         supabase.table("games")
         .select("*")
         .in_("appid", appids)
-        .execute()
     )
+    games_response = _apply_route_filters(games_query, intent).execute()
     return parse_games(games_response.data or []), similarity_scores
 
 
-def fetch_candidate_games(intent: ParsedUserIntent, resolved_reference_games: list[GameRow]) -> CandidatePool:
+def fetch_candidate_games(
+    intent: ParsedUserIntent,
+    resolved_reference_games: list[GameRow],
+    blocked_appids: set[str] | None = None,
+    ownership_filtered_user_id: str | None = None,
+) -> CandidatePool:
     supabase = get_supabase_client()
     merged: dict[str, GameRow] = {}
     route_map: dict[str, set[str]] = {}
     retrieval_scores: dict[str, float] = {}
+    blocked = blocked_appids or set()
 
     if intent.preferred_tags:
         genre_terms = sorted({*intent.preferred_tags, *(tag.title() for tag in intent.preferred_tags)})
-        tags_response = (
+        tags_query = (
             supabase.table("games")
             .select("*")
             .overlaps("tags", intent.preferred_tags)
-            .limit(160)
-            .execute()
         )
+        tags_response = _apply_route_filters(tags_query, intent).limit(160).execute()
         _upsert_candidates(
             merged,
             route_map,
             parse_games(tags_response.data or []),
             "preferred_tags",
+            blocked,
         )
 
-        genres_response = (
+        genres_query = (
             supabase.table("games")
             .select("*")
             .overlaps("genres", genre_terms)
-            .limit(120)
-            .execute()
         )
+        genres_response = _apply_route_filters(genres_query, intent).limit(120).execute()
         _upsert_candidates(
             merged,
             route_map,
             parse_games(genres_response.data or []),
             "genres",
+            blocked,
         )
 
     query_tokens = tokenize(intent.free_text_intent)[:8]
     if query_tokens:
         text_clause = _text_search_clause(query_tokens)
         if text_clause:
-            text_response = (
+            text_query = (
                 supabase.table("games")
                 .select("*")
                 .or_(text_clause)
-                .limit(140)
-                .execute()
             )
+            text_response = _apply_route_filters(text_query, intent).limit(140).execute()
             _upsert_candidates(
                 merged,
                 route_map,
                 parse_games(text_response.data or []),
                 "free_text",
+                blocked,
             )
 
-    embedding_games, embedding_scores = fetch_embedding_candidates(supabase, intent)
+    embedding_games, embedding_scores = fetch_embedding_candidates(
+        supabase,
+        intent,
+        ownership_filtered_user_id=ownership_filtered_user_id,
+    )
     if embedding_games:
         _upsert_candidates(
             merged,
             route_map,
             embedding_games,
             "semantic_embedding",
+            blocked,
         )
         retrieval_scores.update(embedding_scores)
 
@@ -285,79 +325,78 @@ def fetch_candidate_games(intent: ParsedUserIntent, resolved_reference_games: li
         )[:8]
 
         if reference_tags:
-            reference_tag_response = (
+            reference_tag_query = (
                 supabase.table("games")
                 .select("*")
                 .overlaps("tags", reference_tags)
-                .limit(160)
-                .execute()
             )
+            reference_tag_response = _apply_route_filters(reference_tag_query, intent).limit(160).execute()
             _upsert_candidates(
                 merged,
                 route_map,
                 parse_games(reference_tag_response.data or []),
                 "reference_expansion",
+                blocked,
             )
 
         if reference_genres:
-            reference_genre_response = (
+            reference_genre_query = (
                 supabase.table("games")
                 .select("*")
                 .overlaps("genres", reference_genres)
-                .limit(120)
-                .execute()
             )
+            reference_genre_response = _apply_route_filters(reference_genre_query, intent).limit(120).execute()
             _upsert_candidates(
                 merged,
                 route_map,
                 parse_games(reference_genre_response.data or []),
                 "reference_expansion",
+                blocked,
             )
 
         if reference_context_tokens:
             reference_text_clause = _text_search_clause(reference_context_tokens)
             if reference_text_clause:
-                reference_text_response = (
+                reference_text_query = (
                     supabase.table("games")
                     .select("*")
                     .or_(reference_text_clause)
-                    .limit(120)
-                    .execute()
                 )
+                reference_text_response = _apply_route_filters(reference_text_query, intent).limit(120).execute()
                 _upsert_candidates(
                     merged,
                     route_map,
                     parse_games(reference_text_response.data or []),
                     "reference_expansion",
+                    blocked,
                 )
 
     excluded_appids = {game.appid for game in resolved_reference_games}
     candidates = [
         game
         for appid, game in merged.items()
-        if intent.include_reference_games or appid not in excluded_appids
+        if (intent.include_reference_games or appid not in excluded_appids) and appid not in blocked
     ]
     candidates = _apply_constraints(candidates, intent)
 
     if len(candidates) < TARGET_MIN_CANDIDATES:
-        fallback_response = (
+        fallback_query = (
             supabase.table("games")
             .select("*")
             .order("total_reviews", desc=True)
-            .limit(180)
-            .execute()
         )
+        fallback_response = _apply_route_filters(fallback_query, intent).limit(180).execute()
         fallback_games = [
             game
             for game in parse_games(fallback_response.data or [])
             if intent.include_reference_games or game.appid not in excluded_appids
         ]
         fallback_games = _apply_constraints(fallback_games, intent)
-        _upsert_candidates(merged, route_map, fallback_games, "fallback_popular")
+        _upsert_candidates(merged, route_map, fallback_games, "fallback_popular", blocked)
         candidates = [
             game
             for appid, game in merged.items()
-            if intent.include_reference_games or appid not in excluded_appids
+            if (intent.include_reference_games or appid not in excluded_appids) and appid not in blocked
         ]
         candidates = _apply_constraints(candidates, intent)
 

@@ -2,6 +2,7 @@ import type {
   HistoryEntry,
   RecommendationResponse,
   RecommendationSessionResponse,
+  SteamAccountStatus,
 } from "@/lib/types";
 
 function getBackendUrl() {
@@ -41,6 +42,31 @@ export async function fetchRecommendationSession(sessionId: string, userId: stri
   });
 
   return parseJson<RecommendationSessionResponse>(response);
+}
+
+export async function fetchSteamAccountStatus(userId: string) {
+  const response = await fetch(`${getBackendUrl()}/steam/account`, {
+    headers: {
+      "x-user-id": userId,
+    },
+    cache: "no-store",
+  });
+
+  return parseJson<SteamAccountStatus>(response);
+}
+
+export async function linkSteamAccount(userId: string, steamId: string) {
+  const response = await fetch(`${getBackendUrl()}/steam/link`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "x-user-id": userId,
+    },
+    body: JSON.stringify({ steamId }),
+    cache: "no-store",
+  });
+
+  return parseJson<SteamAccountStatus>(response);
 }
 
 export type CreateRecommendationPayload = RecommendationResponse;

@@ -4,11 +4,16 @@ import { useAuth } from "@clerk/nextjs";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
 import { env } from "@/lib/env";
+import type { RecommendationRequest } from "@/lib/types";
+
+
+const DEFAULT_MIN_TOTAL_REVIEWS = 100;
 
 export function SearchForm() {
   const { userId } = useAuth();
   const router = useRouter();
   const [prompt, setPrompt] = useState("");
+  const [minTotalReviews, setMinTotalReviews] = useState(DEFAULT_MIN_TOTAL_REVIEWS);
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
 
@@ -31,13 +36,20 @@ export function SearchForm() {
         );
       }
 
+      const requestPayload: RecommendationRequest = {
+        prompt: nextPrompt,
+        constraints: {
+          min_total_reviews: Math.max(0, Math.round(minTotalReviews)),
+        },
+      };
+
       const response = await fetch(`${env.backendUrl}/recommendations`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
           "x-user-id": userId ?? "",
         },
-        body: JSON.stringify({ prompt: nextPrompt }),
+        body: JSON.stringify(requestPayload),
       });
 
       const payload = (await response.json()) as { sessionId?: string; error?: string };
@@ -70,9 +82,32 @@ export function SearchForm() {
         placeholder="Something like Hades, but faster, cleaner, and less grindy. I want strong combat feel and stylish art."
         className="min-h-36 resize-none rounded-[1.5rem] border border-white/8 bg-slate-950/40 px-5 py-4 text-base text-white outline-none transition placeholder:text-slate-400/55 focus:border-cyan-200/45 focus:bg-slate-950/60 md:text-lg"
       />
+      <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_220px] md:items-end">
+        <div>
+          <p className="text-xs uppercase tracking-[0.24em] text-slate-300/66">Catalog filter</p>
+          <p className="mt-2 text-sm text-slate-300/72">
+            Ignore games with very little review volume before retrieval and ranking.
+          </p>
+        </div>
+        <label className="flex flex-col gap-2 text-sm text-slate-200" htmlFor="min-total-reviews">
+          <span className="text-xs uppercase tracking-[0.24em] text-slate-300/66">Minimum reviews</span>
+          <input
+            id="min-total-reviews"
+            type="number"
+            min={0}
+            step={50}
+            inputMode="numeric"
+            value={minTotalReviews}
+            onChange={(event) =>
+              setMinTotalReviews(Math.max(0, Number.parseInt(event.target.value || "0", 10) || 0))
+            }
+            className="h-12 rounded-2xl border border-white/8 bg-slate-950/40 px-4 text-base text-white outline-none transition focus:border-cyan-200/45 focus:bg-slate-950/60"
+          />
+        </label>
+      </div>
       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
         <p className="text-sm text-slate-300/72">
-          The UI is ready for the backend split. Recommendation submission will use the FastAPI service once NEXT_PUBLIC_BACKEND_URL is configured.
+          New searches will only consider games with at least {Math.max(0, Math.round(minTotalReviews))} reviews.
         </p>
         <button
           type="submit"

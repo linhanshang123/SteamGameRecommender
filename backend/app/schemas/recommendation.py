@@ -8,6 +8,16 @@ class IntentConstraints(BaseModel):
     year_min: int | None = None
     single_player: bool | None = None
     multiplayer: bool | None = None
+    min_total_reviews: int | None = None
+
+    @field_validator("min_total_reviews")
+    @classmethod
+    def validate_min_total_reviews(cls, value: int | None) -> int | None:
+        if value is None:
+            return None
+        if value < 0:
+            raise ValueError("min_total_reviews must be greater than or equal to 0.")
+        return value
 
 
 class ParsedUserIntent(BaseModel):
@@ -71,6 +81,7 @@ class RankedRecommendation(BaseModel):
     name: str
     price: float | None = None
     year: int | None = None
+    totalReviews: int | None = None
     tags: list[str] = Field(default_factory=list)
     genres: list[str] = Field(default_factory=list)
     ratingRatio: float = 0
@@ -86,6 +97,7 @@ class RankedRecommendation(BaseModel):
 
 class RecommendationRequest(BaseModel):
     prompt: str
+    constraints: IntentConstraints | None = None
 
 
 class RecommendationResponse(BaseModel):
