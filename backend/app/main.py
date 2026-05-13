@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.api.recommendations import router as recommendations_router
 from app.api.steam import router as steam_router
 from app.core.config import get_settings
+from app.services.recommendation.faiss_index import preload_faiss_semantic_index
 
 settings = get_settings()
 
@@ -17,6 +18,12 @@ app.add_middleware(
 )
 app.include_router(recommendations_router)
 app.include_router(steam_router)
+
+
+@app.on_event("startup")
+def preload_retrieval_artifacts() -> None:
+    if settings.faiss_preload_on_startup:
+        preload_faiss_semantic_index()
 
 
 @app.get("/health")

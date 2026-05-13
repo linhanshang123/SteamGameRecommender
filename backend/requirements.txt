@@ -4,3 +4,4 @@ supabase==2.15.1
 langchain-openai==1.1.13
 openai==2.33.0
 pydantic==2.12.3
+faiss-cpu==1.13.2

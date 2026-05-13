@@ -2,7 +2,11 @@ from fastapi import APIRouter, Header, HTTPException
 
 from app.api.recommendations import require_user_id
 from app.schemas.steam import SteamAccountResponse, SteamLinkRequest
-from app.services.steam import fetch_steam_account, link_steam_account
+from app.services.steam import (
+    fetch_steam_account,
+    link_steam_account,
+    refresh_steam_account,
+)
 
 router = APIRouter(prefix="/steam", tags=["steam"])
 
@@ -24,6 +28,18 @@ def create_steam_link(
 ) -> SteamAccountResponse:
     try:
         return link_steam_account(require_user_id(x_user_id), request.steamId)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+@router.post("/refresh", response_model=SteamAccountResponse)
+def refresh_linked_steam_account(
+    x_user_id: str | None = Header(default=None),
+) -> SteamAccountResponse:
+    try:
+        return refresh_steam_account(require_user_id(x_user_id))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:

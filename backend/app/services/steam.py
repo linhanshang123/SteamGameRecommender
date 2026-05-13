@@ -31,6 +31,18 @@ def build_steam_profile_url(steam_id: str) -> str:
     return f"https://steamcommunity.com/profiles/{steam_id}"
 
 
+def _account_row_from_payload(row: dict[str, Any]) -> SteamAccountRow:
+    return SteamAccountRow(
+        user_id=str(row["user_id"]),
+        steam_id=str(row["steam_id"]),
+        profile_url=str(row.get("profile_url") or build_steam_profile_url(str(row["steam_id"]))),
+        ownership_sync_status=str(row.get("ownership_sync_status") or "unknown"),
+        ownership_sync_error=row.get("ownership_sync_error"),
+        owned_game_count=int(row.get("owned_game_count") or 0),
+        last_sync_at=row.get("last_sync_at"),
+    )
+
+
 def _steam_request(url: str) -> dict[str, Any]:
     with urlopen(url, timeout=20) as response:
         return json.loads(response.read().decode("utf-8"))
@@ -88,6 +100,22 @@ def fetch_owned_games_from_steam(steam_id: str) -> SteamSyncResult:
 
 
 def fetch_steam_account(user_id: str) -> SteamAccountResponse:
+    account = _load_steam_account_row(user_id)
+    if not account:
+        return SteamAccountResponse(linked=False)
+
+    return SteamAccountResponse(
+        linked=True,
+        steamId=account.steam_id,
+        profileUrl=account.profile_url,
+        ownershipSyncStatus=account.ownership_sync_status,
+        ownershipSyncError=account.ownership_sync_error,
+        ownedGameCount=account.owned_game_count,
+        lastSyncAt=account.last_sync_at,
+    )
+
+
+def _load_steam_account_row(user_id: str) -> SteamAccountRow | None:
     supabase = get_supabase_client()
     response = (
         supabase.table("user_steam_accounts")
@@ -98,18 +126,8 @@ def fetch_steam_account(user_id: str) -> SteamAccountResponse:
     )
     rows = response.data or []
     if not rows:
-        return SteamAccountResponse(linked=False)
-
-    row = rows[0]
-    return SteamAccountResponse(
-        linked=True,
-        steamId=row.get("steam_id"),
-        profileUrl=row.get("profile_url"),
-        ownershipSyncStatus=row.get("ownership_sync_status"),
-        ownershipSyncError=row.get("ownership_sync_error"),
-        ownedGameCount=row.get("owned_game_count") or 0,
-        lastSyncAt=row.get("last_sync_at"),
-    )
+        return None
+    return _account_row_from_payload(rows[0])
 
 
 def fetch_owned_appids_for_user(user_id: str) -> set[str]:
@@ -154,30 +172,14 @@ def _replace_owned_games(user_id: str, steam_id: str, games: list[SteamOwnedGame
         ).execute()
 
 
-def link_steam_account(user_id: str, steam_id: str) -> SteamAccountResponse:
+def _sync_linked_account(
+    user_id: str,
+    steam_id: str,
+    profile_url: str,
+    previous_steam_id: str | None,
+    previous_owned_game_count: int,
+) -> SteamAccountResponse:
     supabase = get_supabase_client()
-    existing_user_response = (
-        supabase.table("user_steam_accounts")
-        .select("steam_id,owned_game_count")
-        .eq("user_id", user_id)
-        .limit(1)
-        .execute()
-    )
-    existing_user_rows = existing_user_response.data or []
-    previous_steam_id = str(existing_user_rows[0]["steam_id"]) if existing_user_rows else None
-
-    existing_steam_response = (
-        supabase.table("user_steam_accounts")
-        .select("user_id")
-        .eq("steam_id", steam_id)
-        .limit(1)
-        .execute()
-    )
-    existing_rows = existing_steam_response.data or []
-    if existing_rows and existing_rows[0]["user_id"] != user_id:
-        raise ValueError("This Steam account is already linked to another user.")
-
-    profile_url = build_steam_profile_url(steam_id)
     supabase.table("user_steam_accounts").upsert(
         {
             "user_id": user_id,
@@ -205,15 +207,58 @@ def link_steam_account(user_id: str, steam_id: str) -> SteamAccountResponse:
     else:
         if previous_steam_id and previous_steam_id != steam_id:
             supabase.table("user_owned_games").delete().eq("user_id", user_id).execute()
+
+        preserved_owned_count = 0 if previous_steam_id and previous_steam_id != steam_id else previous_owned_game_count
         supabase.table("user_steam_accounts").update(
             {
                 "steam_id": steam_id,
                 "profile_url": profile_url,
                 "ownership_sync_status": sync_result.status,
                 "ownership_sync_error": sync_result.error,
-                "owned_game_count": 0 if previous_steam_id and previous_steam_id != steam_id else existing_user_rows[0].get("owned_game_count", 0) if existing_user_rows else 0,
+                "owned_game_count": preserved_owned_count,
                 "last_sync_at": datetime.now(UTC).isoformat(),
             }
         ).eq("user_id", user_id).execute()
 
     return fetch_steam_account(user_id)
+
+
+def link_steam_account(user_id: str, steam_id: str) -> SteamAccountResponse:
+    supabase = get_supabase_client()
+    existing_account = _load_steam_account_row(user_id)
+    previous_steam_id = existing_account.steam_id if existing_account else None
+    previous_owned_game_count = existing_account.owned_game_count if existing_account else 0
+
+    existing_steam_response = (
+        supabase.table("user_steam_accounts")
+        .select("user_id")
+        .eq("steam_id", steam_id)
+        .limit(1)
+        .execute()
+    )
+    existing_rows = existing_steam_response.data or []
+    if existing_rows and existing_rows[0]["user_id"] != user_id:
+        raise ValueError("This Steam account is already linked to another user.")
+
+    profile_url = build_steam_profile_url(steam_id)
+    return _sync_linked_account(
+        user_id,
+        steam_id,
+        profile_url,
+        previous_steam_id,
+        previous_owned_game_count,
+    )
+
+
+def refresh_steam_account(user_id: str) -> SteamAccountResponse:
+    account = _load_steam_account_row(user_id)
+    if not account:
+        raise ValueError("No Steam account is linked to this user.")
+
+    return _sync_linked_account(
+        user_id,
+        account.steam_id,
+        account.profile_url,
+        account.steam_id,
+        account.owned_game_count,
+    )

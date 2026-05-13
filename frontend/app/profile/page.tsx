@@ -46,11 +46,17 @@ function recentPromptPreview(sessions: HistoryEntry[]) {
   }));
 }
 
-export default async function ProfilePage() {
+export default async function ProfilePage({
+  searchParams,
+}: {
+  searchParams: Promise<{ steam?: string }>;
+}) {
   const { userId } = await auth();
   if (!userId) {
     redirect("/");
   }
+
+  const { steam } = await searchParams;
 
   const [user, sessions, steamAccount] = await Promise.all([
     currentUser(),
@@ -66,6 +72,17 @@ export default async function ProfilePage() {
     <main className="min-h-screen pb-16">
       <SiteHeader />
       <section className="mx-auto max-w-6xl px-6 py-8 lg:px-10">
+        {steam === "refreshed" ? (
+          <div className="panel mb-6 rounded-2xl border border-emerald-200/18 bg-emerald-100/8 px-5 py-4 text-sm text-emerald-50">
+            Steam library sync completed. New recommendation requests will use the refreshed ownership data.
+          </div>
+        ) : null}
+        {steam === "error" ? (
+          <div className="panel mb-6 rounded-2xl border border-rose-200/18 bg-rose-100/8 px-5 py-4 text-sm text-rose-100">
+            Steam library refresh failed. Check the sync status below and try again.
+          </div>
+        ) : null}
+
         <div className="grid gap-6 lg:grid-cols-[1.2fr_0.8fr]">
           <div className="panel rounded-[2rem] px-6 py-6">
             <p className="text-sm uppercase tracking-[0.28em] text-slate-400">Profile</p>
@@ -132,6 +149,14 @@ export default async function ProfilePage() {
                   >
                     Open Steam profile
                   </a>
+                  <form action="/api/steam/refresh" method="post">
+                    <button
+                      type="submit"
+                      className="rounded-full border border-white/12 bg-white/8 px-4 py-2 text-sm text-white transition hover:bg-white/12"
+                    >
+                      Refresh Steam library
+                    </button>
+                  </form>
                 </div>
               </div>
             ) : (

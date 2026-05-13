@@ -69,4 +69,16 @@ export async function linkSteamAccount(userId: string, steamId: string) {
   return parseJson<SteamAccountStatus>(response);
 }
 
+export async function refreshSteamAccount(userId: string) {
+  const response = await fetch(`${getBackendUrl()}/steam/refresh`, {
+    method: "POST",
+    headers: {
+      "x-user-id": userId,
+    },
+    cache: "no-store",
+  });
+
+  return parseJson<SteamAccountStatus>(response);
+}
+
 export type CreateRecommendationPayload = RecommendationResponse;

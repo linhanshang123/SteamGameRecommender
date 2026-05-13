@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, field
 
 from app.core.config import get_settings
 from app.core.supabase import get_supabase_client
 from app.schemas.recommendation import GameRow, ParsedUserIntent
 from app.services.recommendation.embedding import create_query_embedding
-from app.services.recommendation.tokenize import tokenize
+from app.services.recommendation.faiss_index import get_faiss_semantic_index
 
 
-TARGET_MIN_CANDIDATES = 100
-TARGET_MAX_CANDIDATES = 300
-VECTOR_RETRIEVAL_LIMIT = 100
+VECTOR_RETRIEVAL_LIMIT = 300
 
 
 @dataclass
@@ -29,38 +26,6 @@ def parse_games(payload: list[dict]) -> list[GameRow]:
 
 def game_text_blob(game: GameRow) -> str:
     return game.embedding_text or game.llm_context or ""
-
-
-def _upsert_candidates(
-    merged: dict[str, GameRow],
-    route_map: dict[str, set[str]],
-    games: list[GameRow],
-    route_name: str,
-    blocked_appids: set[str] | None = None,
-) -> None:
-    blocked = blocked_appids or set()
-    for game in games:
-        if game.appid in blocked:
-            continue
-        merged.setdefault(game.appid, game)
-        route_map.setdefault(game.appid, set()).add(route_name)
-
-
-def _pretrim_score(game: GameRow, routes: set[str]) -> float:
-    route_weight = sum(
-        {
-            "preferred_tags": 1.6,
-            "genres": 1.0,
-            "free_text": 1.1,
-            "reference_expansion": 1.4,
-            "semantic_embedding": 1.5,
-            "fallback_popular": 0.3,
-        }.get(route, 0.0)
-        for route in routes
-    )
-    review_signal = math.log10((game.total_reviews or 0) + 1)
-    rating_signal = game.rating_ratio or 0
-    return route_weight + 0.25 * review_signal + 0.1 * rating_signal
 
 
 def _apply_constraints(games: list[GameRow], intent: ParsedUserIntent) -> list[GameRow]:
@@ -185,36 +150,18 @@ def fetch_embedding_candidates(
 
     settings = get_settings()
     if not settings.openai_api_key:
-        return [], {}
+        raise RuntimeError("OPENAI_API_KEY is required for semantic retrieval.")
 
-    try:
-        query_embedding = create_query_embedding(query_text, settings)
-        minimum_total_reviews = (
-            intent.constraints.min_total_reviews
-            if intent.constraints and intent.constraints.min_total_reviews is not None
-            else None
-        )
-        match_response = supabase.rpc(
-            "match_games_by_embedding",
-            {
-                "query_embedding": query_embedding,
-                "match_count": VECTOR_RETRIEVAL_LIMIT,
-                "minimum_total_reviews": minimum_total_reviews,
-                "excluded_user_id": ownership_filtered_user_id,
-            },
-        ).execute()
-    except Exception:
-        return [], {}
-
-    matches = match_response.data or []
-    appids = [row.get("appid") for row in matches if row.get("appid")]
+    query_embedding = create_query_embedding(query_text, settings)
+    matches = get_faiss_semantic_index().search(query_embedding, VECTOR_RETRIEVAL_LIMIT)
+    appids = [hit.appid for hit in matches if hit.appid]
     if not appids:
         return [], {}
 
     similarity_scores = {
-        row["appid"]: float(row.get("similarity") or 0.0)
-        for row in matches
-        if row.get("appid")
+        hit.appid: float(hit.similarity)
+        for hit in matches
+        if hit.appid
     }
 
     games_query = (
@@ -223,7 +170,12 @@ def fetch_embedding_candidates(
         .in_("appid", appids)
     )
     games_response = _apply_route_filters(games_query, intent).execute()
-    return parse_games(games_response.data or []), similarity_scores
+    games_by_appid = {
+        game.appid: game
+        for game in parse_games(games_response.data or [])
+    }
+    ordered_games = [games_by_appid[appid] for appid in appids if appid in games_by_appid]
+    return ordered_games, similarity_scores
 
 
 def fetch_candidate_games(
@@ -232,196 +184,44 @@ def fetch_candidate_games(
     blocked_appids: set[str] | None = None,
     ownership_filtered_user_id: str | None = None,
 ) -> CandidatePool:
-    supabase = get_supabase_client()
-    merged: dict[str, GameRow] = {}
-    route_map: dict[str, set[str]] = {}
-    retrieval_scores: dict[str, float] = {}
     blocked = blocked_appids or set()
-
-    if intent.preferred_tags:
-        genre_terms = sorted({*intent.preferred_tags, *(tag.title() for tag in intent.preferred_tags)})
-        tags_query = (
-            supabase.table("games")
-            .select("*")
-            .overlaps("tags", intent.preferred_tags)
-        )
-        tags_response = _apply_route_filters(tags_query, intent).limit(160).execute()
-        _upsert_candidates(
-            merged,
-            route_map,
-            parse_games(tags_response.data or []),
-            "preferred_tags",
-            blocked,
-        )
-
-        genres_query = (
-            supabase.table("games")
-            .select("*")
-            .overlaps("genres", genre_terms)
-        )
-        genres_response = _apply_route_filters(genres_query, intent).limit(120).execute()
-        _upsert_candidates(
-            merged,
-            route_map,
-            parse_games(genres_response.data or []),
-            "genres",
-            blocked,
-        )
-
-    query_tokens = tokenize(intent.free_text_intent)[:8]
-    if query_tokens:
-        text_clause = _text_search_clause(query_tokens)
-        if text_clause:
-            text_query = (
-                supabase.table("games")
-                .select("*")
-                .or_(text_clause)
-            )
-            text_response = _apply_route_filters(text_query, intent).limit(140).execute()
-            _upsert_candidates(
-                merged,
-                route_map,
-                parse_games(text_response.data or []),
-                "free_text",
-                blocked,
-            )
-
+    supabase = get_supabase_client()
     embedding_games, embedding_scores = fetch_embedding_candidates(
         supabase,
         intent,
         ownership_filtered_user_id=ownership_filtered_user_id,
     )
-    if embedding_games:
-        _upsert_candidates(
-            merged,
-            route_map,
-            embedding_games,
-            "semantic_embedding",
-            blocked,
-        )
-        retrieval_scores.update(embedding_scores)
-
-    if resolved_reference_games:
-        reference_tags = sorted(
-            {
-                value
-                for game in resolved_reference_games
-                for value in [*(game.tags or []), *(game.genres or [])]
-            }
-        )
-        reference_genres = sorted(
-            {
-                value
-                for game in resolved_reference_games
-                for value in (game.genres or [])
-            }
-        )
-        reference_context_tokens = sorted(
-            {
-                token
-                for game in resolved_reference_games
-                for token in tokenize(game_text_blob(game))
-            }
-        )[:8]
-
-        if reference_tags:
-            reference_tag_query = (
-                supabase.table("games")
-                .select("*")
-                .overlaps("tags", reference_tags)
-            )
-            reference_tag_response = _apply_route_filters(reference_tag_query, intent).limit(160).execute()
-            _upsert_candidates(
-                merged,
-                route_map,
-                parse_games(reference_tag_response.data or []),
-                "reference_expansion",
-                blocked,
-            )
-
-        if reference_genres:
-            reference_genre_query = (
-                supabase.table("games")
-                .select("*")
-                .overlaps("genres", reference_genres)
-            )
-            reference_genre_response = _apply_route_filters(reference_genre_query, intent).limit(120).execute()
-            _upsert_candidates(
-                merged,
-                route_map,
-                parse_games(reference_genre_response.data or []),
-                "reference_expansion",
-                blocked,
-            )
-
-        if reference_context_tokens:
-            reference_text_clause = _text_search_clause(reference_context_tokens)
-            if reference_text_clause:
-                reference_text_query = (
-                    supabase.table("games")
-                    .select("*")
-                    .or_(reference_text_clause)
-                )
-                reference_text_response = _apply_route_filters(reference_text_query, intent).limit(120).execute()
-                _upsert_candidates(
-                    merged,
-                    route_map,
-                    parse_games(reference_text_response.data or []),
-                    "reference_expansion",
-                    blocked,
-                )
 
     excluded_appids = {game.appid for game in resolved_reference_games}
-    candidates = [
-        game
-        for appid, game in merged.items()
-        if (intent.include_reference_games or appid not in excluded_appids) and appid not in blocked
-    ]
+    candidates = []
+    route_payload: dict[str, list[str]] = {}
+    retrieval_scores: dict[str, float] = {}
+
+    for game in embedding_games:
+        if game.appid in blocked:
+            continue
+        if not intent.include_reference_games and game.appid in excluded_appids:
+            continue
+        candidates.append(game)
+        route_payload[game.appid] = ["semantic_embedding"]
+        similarity = embedding_scores.get(game.appid, 0.0)
+        if similarity > 0:
+            retrieval_scores[game.appid] = similarity
+
     candidates = _apply_constraints(candidates, intent)
-
-    if len(candidates) < TARGET_MIN_CANDIDATES:
-        fallback_query = (
-            supabase.table("games")
-            .select("*")
-            .order("total_reviews", desc=True)
-        )
-        fallback_response = _apply_route_filters(fallback_query, intent).limit(180).execute()
-        fallback_games = [
-            game
-            for game in parse_games(fallback_response.data or [])
-            if intent.include_reference_games or game.appid not in excluded_appids
-        ]
-        fallback_games = _apply_constraints(fallback_games, intent)
-        _upsert_candidates(merged, route_map, fallback_games, "fallback_popular", blocked)
-        candidates = [
-            game
-            for appid, game in merged.items()
-            if (intent.include_reference_games or appid not in excluded_appids) and appid not in blocked
-        ]
-        candidates = _apply_constraints(candidates, intent)
-
-    if len(candidates) > TARGET_MAX_CANDIDATES:
-        candidates.sort(
-            key=lambda game: (
-                _pretrim_score(game, route_map.get(game.appid, set()))
-                + retrieval_scores.get(game.appid, 0.0)
-            ),
-            reverse=True,
-        )
-        candidates = candidates[:TARGET_MAX_CANDIDATES]
-
     route_payload = {
-        game.appid: sorted(route_map.get(game.appid, set()))
+        game.appid: route_payload.get(game.appid, ["semantic_embedding"])
         for game in candidates
+    }
+    retrieval_scores = {
+        game.appid: retrieval_scores.get(game.appid, 0.0)
+        for game in candidates
+        if retrieval_scores.get(game.appid, 0.0) > 0
     }
 
     return CandidatePool(
         candidates=candidates,
         retrieval_routes=route_payload,
-        retrieval_scores={
-            game.appid: retrieval_scores.get(game.appid, 0.0)
-            for game in candidates
-            if retrieval_scores.get(game.appid, 0.0) > 0
-        },
+        retrieval_scores=retrieval_scores,
         resolved_reference_games=resolved_reference_games,
     )
