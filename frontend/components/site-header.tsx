@@ -1,6 +1,6 @@
 import Link from "next/link";
 import { auth } from "@clerk/nextjs/server";
-import { SignedIn, SignedOut, SignInButton, SignUpButton, UserButton } from "@clerk/nextjs";
+import { SignedIn, SignedOut, UserButton } from "@clerk/nextjs";
 import { fetchSteamAccountStatus } from "@/lib/backend-api";
 
 const navItems = [
@@ -43,16 +43,18 @@ export async function SiteHeader() {
 
       <div className="flex items-center gap-3">
         <SignedOut>
-          <SignInButton mode="modal">
-            <button className="rounded-full border border-white/12 bg-white/8 px-4 py-2 text-sm text-white transition hover:bg-white/12">
-              Sign in
-            </button>
-          </SignInButton>
-          <SignUpButton mode="modal">
-            <button className="rounded-full bg-gradient-to-r from-indigo-300 via-sky-300 to-cyan-200 px-4 py-2 text-sm font-medium text-slate-950 shadow-[0_0_28px_rgba(142,167,255,0.35)] transition hover:brightness-105">
-              Create account
-            </button>
-          </SignUpButton>
+          <Link
+            href="/sign-in"
+            className="rounded-full border border-white/12 bg-white/8 px-4 py-2 text-sm text-white transition hover:bg-white/12"
+          >
+            Sign in
+          </Link>
+          <Link
+            href="/sign-up"
+            className="rounded-full bg-gradient-to-r from-indigo-300 via-sky-300 to-cyan-200 px-4 py-2 text-sm font-medium text-slate-950 shadow-[0_0_28px_rgba(142,167,255,0.35)] transition hover:brightness-105"
+          >
+            Create account
+          </Link>
         </SignedOut>
         <SignedIn>
           <Link

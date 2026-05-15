@@ -25,6 +25,9 @@ except ImportError as exc:
     raise RuntimeError("FAISS is not installed. Install backend requirements first.") from exc
 
 
+EMBEDDING_EXPORT_RPC = "export_game_embeddings_for_faiss"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Build local FAISS artifacts from Supabase game embeddings.")
     parser.add_argument("--batch-size", type=int, default=500)
@@ -38,26 +41,42 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def fetch_embedding_batch(supabase, batch_size: int, last_appid: str | None) -> list[dict]:
+    try:
+        response = supabase.rpc(
+            EMBEDDING_EXPORT_RPC,
+            {
+                "after_appid": last_appid,
+                "batch_count": batch_size,
+            },
+        ).execute()
+    except Exception as exc:
+        raise RuntimeError(
+            "Failed to export embedding vectors for FAISS builds via Supabase RPC "
+            f"'{EMBEDDING_EXPORT_RPC}'. Apply the latest Supabase migrations and retry."
+        ) from exc
+
+    batch = response.data or []
+    if not isinstance(batch, list):
+        raise RuntimeError(
+            f"Supabase RPC '{EMBEDDING_EXPORT_RPC}' returned an invalid payload."
+        )
+    return batch
+
+
 def iter_embedding_rows(supabase, batch_size: int):
     last_appid: str | None = None
 
     while True:
-        query = (
-            supabase.table("games")
-            .select("appid,embedding_vector")
-            .not_.is_("embedding_vector", "null")
-            .order("appid")
-            .limit(batch_size)
-        )
-        if last_appid is not None:
-            query = query.gt("appid", last_appid)
-
-        response = query.execute()
-        batch = response.data or []
+        batch = fetch_embedding_batch(supabase, batch_size, last_appid)
         if not batch:
             break
 
-        last_appid = str(batch[-1]["appid"])
+        last_appid = str(batch[-1].get("appid") or "")
+        if not last_appid:
+            raise RuntimeError(
+                f"Supabase RPC '{EMBEDDING_EXPORT_RPC}' returned a row without an appid."
+            )
         yield batch
         if len(batch) < batch_size:
             break
@@ -132,16 +151,28 @@ def main() -> None:
     indexed_count = 0
     shards: list[dict[str, object]] = []
 
-    for batch in iter_embedding_rows(supabase, args.batch_size):
+    for batch_number, batch in enumerate(iter_embedding_rows(supabase, args.batch_size), start=1):
         batch_appids: list[str] = []
         batch_vectors: list[np.ndarray] = []
         for row in batch:
-            appid = str(row["appid"])
-            raw_vector = row.get("embedding_vector")
-            if not raw_vector:
+            appid = str(row.get("appid") or "")
+            if not appid:
+                raise RuntimeError(
+                    f"Supabase RPC '{EMBEDDING_EXPORT_RPC}' returned a row without an appid."
+                )
+
+            raw_vector = row.get("embedding_vector_text")
+            if raw_vector is None:
                 continue
             batch_appids.append(appid)
-            batch_vectors.append(normalize_vector(raw_vector, settings.openai_embedding_dimensions))
+            try:
+                batch_vectors.append(
+                    normalize_vector(raw_vector, settings.openai_embedding_dimensions)
+                )
+            except ValueError as exc:
+                raise RuntimeError(
+                    f"Invalid embedding vector returned for appid {appid}."
+                ) from exc
 
         if not batch_vectors:
             continue
@@ -149,7 +180,10 @@ def main() -> None:
         shard_appids.extend(batch_appids)
         shard_vectors.extend(batch_vectors)
         indexed_count += len(batch_appids)
-        print(f"Indexed {indexed_count} embedding rows...")
+        print(
+            f"Fetched batch {batch_number}: {len(batch_appids)} vectors "
+            f"({indexed_count} total indexed so far)."
+        )
         del batch_vectors, batch_appids, batch
 
         while len(shard_appids) >= args.shard_size:
@@ -170,6 +204,7 @@ def main() -> None:
             shard_vectors = shard_vectors[args.shard_size :]
             gc.collect()
 
+        print(f"Completed shards so far: {shard_number}")
         gc.collect()
 
     if not indexed_count:

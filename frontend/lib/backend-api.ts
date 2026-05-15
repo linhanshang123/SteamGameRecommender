@@ -5,6 +5,9 @@ import type {
   SteamAccountStatus,
 } from "@/lib/types";
 
+const DEFAULT_BACKEND_TIMEOUT_MS = 5000;
+const STEAM_ACCOUNT_TIMEOUT_MS = 1500;
+
 function getBackendUrl() {
   const backendUrl = process.env.NEXT_PUBLIC_BACKEND_URL;
   if (!backendUrl) {
@@ -22,60 +25,83 @@ async function parseJson<T>(response: Response) {
   return payload;
 }
 
+async function fetchBackend(
+  path: string,
+  init: RequestInit = {},
+  timeoutMs = DEFAULT_BACKEND_TIMEOUT_MS,
+) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(`${getBackendUrl()}${path}`, {
+      ...init,
+      cache: "no-store",
+      signal: controller.signal,
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("Backend request timed out.");
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 export async function fetchHistory(userId: string) {
-  const response = await fetch(`${getBackendUrl()}/history`, {
+  const response = await fetchBackend("/history", {
     headers: {
       "x-user-id": userId,
     },
-    cache: "no-store",
   });
 
   return parseJson<HistoryEntry[]>(response);
 }
 
 export async function fetchRecommendationSession(sessionId: string, userId: string) {
-  const response = await fetch(`${getBackendUrl()}/recommendations/${sessionId}`, {
+  const response = await fetchBackend(`/recommendations/${sessionId}`, {
     headers: {
       "x-user-id": userId,
     },
-    cache: "no-store",
   });
 
   return parseJson<RecommendationSessionResponse>(response);
 }
 
 export async function fetchSteamAccountStatus(userId: string) {
-  const response = await fetch(`${getBackendUrl()}/steam/account`, {
-    headers: {
-      "x-user-id": userId,
+  const response = await fetchBackend(
+    "/steam/account",
+    {
+      headers: {
+        "x-user-id": userId,
+      },
     },
-    cache: "no-store",
-  });
+    STEAM_ACCOUNT_TIMEOUT_MS,
+  );
 
   return parseJson<SteamAccountStatus>(response);
 }
 
 export async function linkSteamAccount(userId: string, steamId: string) {
-  const response = await fetch(`${getBackendUrl()}/steam/link`, {
+  const response = await fetchBackend("/steam/link", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-user-id": userId,
     },
     body: JSON.stringify({ steamId }),
-    cache: "no-store",
   });
 
   return parseJson<SteamAccountStatus>(response);
 }
 
 export async function refreshSteamAccount(userId: string) {
-  const response = await fetch(`${getBackendUrl()}/steam/refresh`, {
+  const response = await fetchBackend("/steam/refresh", {
     method: "POST",
     headers: {
       "x-user-id": userId,
     },
-    cache: "no-store",
   });
 
   return parseJson<SteamAccountStatus>(response);

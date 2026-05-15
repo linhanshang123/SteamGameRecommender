@@ -1,4 +1,5 @@
-import { SignedIn, SignedOut, SignInButton, SignUpButton } from "@clerk/nextjs";
+import Link from "next/link";
+import { SignedIn, SignedOut } from "@clerk/nextjs";
 import { SearchForm } from "@/components/search-form";
 import { SiteHeader } from "@/components/site-header";
 
@@ -48,16 +49,18 @@ export default async function HomePage({
                 Sign in to save recommendation history and generate ranked results from the Steam catalog.
               </p>
               <div className="flex flex-wrap justify-center gap-3">
-                <SignInButton mode="modal">
-                  <button className="rounded-full bg-gradient-to-r from-indigo-300 via-sky-300 to-cyan-200 px-5 py-3 text-sm font-semibold text-slate-950">
-                    Sign in to start
-                  </button>
-                </SignInButton>
-                <SignUpButton mode="modal">
-                  <button className="rounded-full border border-white/12 bg-white/6 px-5 py-3 text-sm text-white">
-                    Create account
-                  </button>
-                </SignUpButton>
+                <Link
+                  href="/sign-in"
+                  className="rounded-full bg-gradient-to-r from-indigo-300 via-sky-300 to-cyan-200 px-5 py-3 text-sm font-semibold text-slate-950"
+                >
+                  Sign in to start
+                </Link>
+                <Link
+                  href="/sign-up"
+                  className="rounded-full border border-white/12 bg-white/6 px-5 py-3 text-sm text-white"
+                >
+                  Create account
+                </Link>
               </div>
             </div>
           </SignedOut>

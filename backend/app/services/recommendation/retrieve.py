@@ -6,10 +6,17 @@ from app.core.config import get_settings
 from app.core.supabase import get_supabase_client
 from app.schemas.recommendation import GameRow, ParsedUserIntent
 from app.services.recommendation.embedding import create_query_embedding
-from app.services.recommendation.faiss_index import get_faiss_semantic_index
+from app.services.recommendation.faiss_index import (
+    SemanticSearchHit,
+    get_faiss_semantic_index,
+)
 
 
 VECTOR_RETRIEVAL_LIMIT = 300
+GAME_METADATA_BATCH_SIZE = 100
+FAISS_ROUTE = "semantic_embedding_faiss"
+SUPABASE_FALLBACK_ROUTE = "semantic_embedding_db_fallback"
+SUPABASE_MATCH_RPC = "match_games_by_embedding"
 
 
 @dataclass
@@ -90,6 +97,10 @@ def _text_search_clause(tokens: list[str]) -> str:
     return ",".join(parts)
 
 
+def _chunked(values: list[str], size: int) -> list[list[str]]:
+    return [values[index : index + size] for index in range(0, len(values), size)]
+
+
 def resolve_reference_games(intent: ParsedUserIntent) -> list[GameRow]:
     if not intent.reference_games:
         return []
@@ -139,24 +150,98 @@ def resolve_reference_games(intent: ParsedUserIntent) -> list[GameRow]:
     return resolved
 
 
+def _search_faiss_matches(query_embedding: list[float], top_k: int) -> list[SemanticSearchHit]:
+    return get_faiss_semantic_index().search(query_embedding, top_k)
+
+
+def _search_supabase_matches(
+    supabase,
+    query_embedding: list[float],
+    top_k: int,
+    minimum_total_reviews: int | None,
+    ownership_filtered_user_id: str | None,
+) -> list[SemanticSearchHit]:
+    response = (
+        supabase.rpc(
+            SUPABASE_MATCH_RPC,
+            {
+                "query_embedding": query_embedding,
+                "match_count": top_k,
+                "minimum_total_reviews": minimum_total_reviews,
+                "excluded_user_id": ownership_filtered_user_id,
+            },
+        )
+        .execute()
+    )
+    rows = response.data or []
+    matches: list[SemanticSearchHit] = []
+    for row in rows:
+        appid = row.get("appid")
+        if not appid:
+            continue
+        matches.append(
+            SemanticSearchHit(
+                appid=str(appid),
+                similarity=float(row.get("similarity") or 0.0),
+            )
+        )
+    return matches
+
+
+def _fetch_games_by_appids(
+    supabase,
+    appids: list[str],
+    intent: ParsedUserIntent,
+) -> dict[str, GameRow]:
+    games_by_appid: dict[str, GameRow] = {}
+    for appid_batch in _chunked(appids, GAME_METADATA_BATCH_SIZE):
+        games_query = (
+            supabase.table("games")
+            .select("*")
+            .in_("appid", appid_batch)
+        )
+        games_response = _apply_route_filters(games_query, intent).execute()
+        for game in parse_games(games_response.data or []):
+            games_by_appid[game.appid] = game
+    return games_by_appid
+
+
 def fetch_embedding_candidates(
     supabase,
     intent: ParsedUserIntent,
     ownership_filtered_user_id: str | None = None,
-) -> tuple[list[GameRow], dict[str, float]]:
+) -> tuple[list[GameRow], dict[str, float], dict[str, list[str]]]:
     query_text = intent.free_text_intent.strip()
     if not query_text:
-        return [], {}
+        return [], {}, {}
 
     settings = get_settings()
     if not settings.openai_api_key:
         raise RuntimeError("OPENAI_API_KEY is required for semantic retrieval.")
 
     query_embedding = create_query_embedding(query_text, settings)
-    matches = get_faiss_semantic_index().search(query_embedding, VECTOR_RETRIEVAL_LIMIT)
+    retrieval_route = FAISS_ROUTE
+    try:
+        matches = _search_faiss_matches(query_embedding, VECTOR_RETRIEVAL_LIMIT)
+    except Exception as faiss_error:
+        try:
+            matches = _search_supabase_matches(
+                supabase,
+                query_embedding,
+                VECTOR_RETRIEVAL_LIMIT,
+                intent.constraints.min_total_reviews if intent.constraints else None,
+                ownership_filtered_user_id,
+            )
+            retrieval_route = SUPABASE_FALLBACK_ROUTE
+        except Exception as fallback_error:
+            raise RuntimeError(
+                "Semantic retrieval failed in both FAISS and Supabase fallback paths. "
+                f"FAISS error: {faiss_error}. Supabase fallback error: {fallback_error}."
+            ) from fallback_error
+
     appids = [hit.appid for hit in matches if hit.appid]
     if not appids:
-        return [], {}
+        return [], {}, {}
 
     similarity_scores = {
         hit.appid: float(hit.similarity)
@@ -164,18 +249,14 @@ def fetch_embedding_candidates(
         if hit.appid
     }
 
-    games_query = (
-        supabase.table("games")
-        .select("*")
-        .in_("appid", appids)
-    )
-    games_response = _apply_route_filters(games_query, intent).execute()
-    games_by_appid = {
-        game.appid: game
-        for game in parse_games(games_response.data or [])
-    }
+    games_by_appid = _fetch_games_by_appids(supabase, appids, intent)
     ordered_games = [games_by_appid[appid] for appid in appids if appid in games_by_appid]
-    return ordered_games, similarity_scores
+    retrieval_routes = {
+        appid: [retrieval_route]
+        for appid in appids
+        if appid in games_by_appid
+    }
+    return ordered_games, similarity_scores, retrieval_routes
 
 
 def fetch_candidate_games(
@@ -186,7 +267,7 @@ def fetch_candidate_games(
 ) -> CandidatePool:
     blocked = blocked_appids or set()
     supabase = get_supabase_client()
-    embedding_games, embedding_scores = fetch_embedding_candidates(
+    embedding_games, embedding_scores, embedding_routes = fetch_embedding_candidates(
         supabase,
         intent,
         ownership_filtered_user_id=ownership_filtered_user_id,
@@ -203,14 +284,14 @@ def fetch_candidate_games(
         if not intent.include_reference_games and game.appid in excluded_appids:
             continue
         candidates.append(game)
-        route_payload[game.appid] = ["semantic_embedding"]
+        route_payload[game.appid] = embedding_routes.get(game.appid, [FAISS_ROUTE])
         similarity = embedding_scores.get(game.appid, 0.0)
         if similarity > 0:
             retrieval_scores[game.appid] = similarity
 
     candidates = _apply_constraints(candidates, intent)
     route_payload = {
-        game.appid: route_payload.get(game.appid, ["semantic_embedding"])
+        game.appid: route_payload.get(game.appid, [FAISS_ROUTE])
         for game in candidates
     }
     retrieval_scores = {
